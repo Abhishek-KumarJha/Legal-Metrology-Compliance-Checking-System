@@ -1,0 +1,5 @@
+[
+  { "id": "product-001", "companyId": "company-kaveri", "name": "Lemon Floor Cleaner", "category": "Homecare", "status": "Action required" },
+  { "id": "product-002", "companyId": "company-kaveri", "name": "Disinfectant Concentrate", "category": "Homecare", "status": "Action required" },
+  { "id": "product-003", "companyId": "company-bharat", "name": "Sunrise Mustard Oil", "category": "Edible oils", "status": "Compliant" }
+]

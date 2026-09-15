@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+client/node_modules/
+server/node_modules/
+
+# Build output
+client/dist/
+server/dist/
+*.tsbuildinfo
+
+# Runtime uploads and temporary files
+server/uploads/*
+server/data/*.tmp
+server/*.traineddata
+
+# Local persisted demo collections
+server/data/inspections.json
+server/data/products.json
+server/data/notifications.json
+server/data/rule-settings.json
+
+# Environment and editor files
+.env
+.env.*
+!.env.example
+.vscode/
+.DS_Store
