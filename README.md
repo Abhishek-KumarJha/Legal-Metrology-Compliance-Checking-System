@@ -37,6 +37,8 @@ The system is deliberately transparent: OCR extracts text, a configurable rule r
 
 ## Run locally
 
+For the team branch and Pull Request workflow, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 From the repository root:
 
 ```bash
