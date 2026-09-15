@@ -1,0 +1,5 @@
+[
+  { "id": "notification-001", "title": "Action required", "text": "Nourish Naturals resubmitted A2 Cow Ghee", "when": "12 minutes ago", "tone": "warning", "read": false },
+  { "id": "notification-002", "title": "New self-check", "text": "Kaveri Homecare submitted Lemon Floor Cleaner", "when": "Yesterday", "tone": "info", "read": false },
+  { "id": "notification-003", "title": "Case reminder", "text": "INSP-2402 follow-up is due tomorrow", "when": "Yesterday", "tone": "alert", "read": false }
+]

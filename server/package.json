@@ -1,0 +1,9 @@
+{
+  "name": "metro-check-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": { "dev": "tsx watch src/index.ts", "build": "tsc", "start": "node dist/index.js", "test": "tsx src/ruleEngine.test.ts" },
+  "dependencies": { "cors": "^2.8.5", "express": "^4.21.2", "multer": "^1.4.5-lts.1", "tesseract.js": "^6.0.0" },
+  "devDependencies": { "@types/cors": "^2.8.17", "@types/express": "^5.0.0", "@types/multer": "^1.4.12", "tsx": "^4.19.2", "typescript": "^5.7.2" }
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "user-officer-001",
+    "name": "Arun Sharma",
+    "role": "officer",
+    "email": "arun.sharma@metrology.gov.in",
+    "password": "metro-check",
+    "orgId": "district-04"
+  },
+  {
+    "id": "user-admin-001",
+    "name": "Nisha Verma",
+    "role": "admin",
+    "email": "nisha.verma@metrology.gov.in",
+    "password": "metro-check",
+    "orgId": "state-office"
+  },
+  {
+    "id": "user-company-001",
+    "name": "Kaveri Homecare",
+    "role": "company",
+    "email": "compliance@kaverihomecare.in",
+    "password": "metro-check",
+    "orgId": "company-kaveri"
+  }
+]

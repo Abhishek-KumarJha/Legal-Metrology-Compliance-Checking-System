@@ -1,0 +1,7 @@
+[
+  { "field_name": "mrp", "regex_pattern": "(MRP|M.R.P) followed by price", "min_font_size_mm": 2, "rule_section_reference": "Rule 6(1)(e)", "is_active": true },
+  { "field_name": "netQuantity", "regex_pattern": "quantity + g|kg|ml|l", "min_font_size_mm": 2, "rule_section_reference": "Rule 6(1)(d)", "is_active": true },
+  { "field_name": "date", "regex_pattern": "MFG|PKD with date", "min_font_size_mm": 2, "rule_section_reference": "Rule 6(1)(c)", "is_active": true },
+  { "field_name": "manufacturer", "regex_pattern": "Mfd by|Packed by|Marketed by + name", "min_font_size_mm": 2, "rule_section_reference": "Rule 6(1)(a)", "is_active": true },
+  { "field_name": "consumerCare", "regex_pattern": "customer care + phone/email", "min_font_size_mm": 2, "rule_section_reference": "Rule 6(1)(f)", "is_active": true }
+]
