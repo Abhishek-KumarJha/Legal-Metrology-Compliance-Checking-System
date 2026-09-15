@@ -110,7 +110,12 @@ app.put('/api/rules/:fieldName', async (req, res) => {
   await writeCollection('rule-settings', ruleSettings);
   return res.json(rule);
 });
-app.get('/api/inspections', (_req, res) => res.json(inspections.map(inspectionPayload)));
+app.get('/api/inspections', (req, res) => {
+  const user = requestUser(req);
+  if (!user) return res.status(401).json({ message: 'Authentication is required' });
+  const visible = user.role === 'company' ? inspections.filter((inspection) => inspection.companyId === user.orgId) : inspections;
+  return res.json(visible.map(inspectionPayload));
+});
 app.get('/api/analytics', (_req, res) => {
   const total = inspections.length;
   const compliant = inspections.filter((inspection) => inspection.status === 'Compliant').length;
@@ -144,6 +149,7 @@ app.patch('/api/users/:id', async (req, res) => {
 });
 app.get('/api/products', (req, res) => {
   const user = requestUser(req);
+  if (!user) return res.status(401).json({ message: 'Authentication is required' });
   const visible = user?.role === 'company' ? products.filter((product) => product.companyId === user.orgId) : products;
   return res.json(visible);
 });
@@ -189,7 +195,7 @@ app.delete('/api/products/:id', async (req, res) => {
   await writeCollection('products', products);
   return res.json(removed);
 });
-app.get('/api/notifications', (req, res) => { const user = requestUser(req); const visible = user?.role === 'company' ? notifications.filter((notification) => !notification.companyId || notification.companyId === user.orgId) : notifications; return res.json(visible); });
+app.get('/api/notifications', (req, res) => { const user = requestUser(req); if (!user) return res.status(401).json({ message: 'Authentication is required' }); const visible = user.role === 'company' ? notifications.filter((notification) => !notification.companyId || notification.companyId === user.orgId) : notifications; return res.json(visible); });
 app.post('/api/notifications/read-all', async (req, res) => { const user = requestUser(req); notifications.forEach((notification) => { if (user?.role !== 'company' || !notification.companyId || notification.companyId === user.orgId) notification.read = true; }); await writeCollection('notifications', notifications); const visible = user?.role === 'company' ? notifications.filter((notification) => !notification.companyId || notification.companyId === user.orgId) : notifications; return res.json(visible); });
 
 app.get('/api/company/dashboard', (req, res) => {
