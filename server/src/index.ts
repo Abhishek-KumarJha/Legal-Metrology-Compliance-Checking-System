@@ -1,41 +1,88 @@
 import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractTextFromImages } from './ocr.js';
 import { rules } from './rules.js';
 import { runRuleEngine, summarizeChecks, type CheckResult } from './ruleEngine.js';
-import users from '../data/users.seed.json' with { type: 'json' };
+import userSeed from '../data/users.seed.json' with { type: 'json' };
 import inspectionSeed from '../data/inspections.seed.json' with { type: 'json' };
 import productSeed from '../data/products.seed.json' with { type: 'json' };
 import notificationSeed from '../data/notifications.seed.json' with { type: 'json' };
 import { readCollection, writeCollection } from './store.js';
+import { generateCompliancePdf } from './report.js';
+import { compareChecks, type ComparedCheck } from './productMatching.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const upload = multer({ dest: path.resolve(__dirname, '../uploads') });
 const port = Number(process.env.PORT ?? 4000);
 
-type Inspection = { id: string; company: string; product: string; status: string; score: number; createdAt: string; checks: CheckResult[]; summary?: ReturnType<typeof summarizeChecks>; ocrText?: string; evidenceImages?: string[] };
-type Product = { id: string; companyId: string; name: string; category: string; status: string };
-type Notification = { id: string; title: string; text: string; when: string; tone: string; read: boolean };
+type Inspection = { id: string; company: string; companyId?: string; product: string; productId?: string; status: string; score: number; createdAt: string; checks: ComparedCheck[]; summary?: ReturnType<typeof summarizeChecks>; ocrText?: string; labelImages?: string[]; evidenceImages?: string[] };
+type Product = { id: string; companyId: string; name: string; category: string; status: string; declaredMrp?: number; declaredNetQuantity?: number; declaredNetUnit?: string; manufacturerDetails?: string; consumerCareDetails?: string };
+type Notification = { id: string; title: string; text: string; when: string; tone: string; read: boolean; companyId?: string; inspectionId?: string };
+type User = { id: string; name: string; role: 'officer' | 'admin' | 'company'; email: string; password: string; orgId: string; active?: boolean };
+type Report = { id: string; inspectionId: string; companyId: string; productId: string; companyName: string; productName: string; productCategory: string; triggeredBy: string; generatedAt: string; verdict: string; score: number; pdfPath: string };
 
 app.use(cors());
 app.use(express.json());
 
 const inspections = await readCollection<Inspection>('inspections', inspectionSeed as Inspection[]);
 const products = await readCollection<Product>('products', productSeed as Product[]);
+for (const seedProduct of productSeed as Product[]) {
+  const existing = products.find((product) => product.id === seedProduct.id);
+  if (existing) Object.assign(existing, seedProduct);
+  else products.push(seedProduct);
+}
+await writeCollection('products', products);
 const notifications = await readCollection<Notification>('notifications', notificationSeed as Notification[]);
 const ruleSettings = await readCollection('rule-settings', rules.map((rule) => ({ fieldName: rule.fieldName, minFontSizeMm: rule.minFontSizeMm, isActive: true })));
+const users = await readCollection<User>('users', userSeed as User[]);
+for (const seedUser of userSeed as User[]) {
+  const existing = users.find((user) => user.email.toLowerCase() === seedUser.email.toLowerCase());
+  if (!existing) users.push({ ...seedUser, active: true });
+  else if (existing.id === seedUser.id && existing.active === false) existing.active = true;
+}
+await writeCollection('users', users);
+const reports = await readCollection<Report>('reports', []);
+const labelDirectory = path.resolve(__dirname, '../uploads/labels');
+
+function inspectionPayload(inspection: Inspection) {
+  const report = reports.find((candidate) => candidate.inspectionId === inspection.id);
+  return {
+    ...inspection,
+    labelImages: (inspection.labelImages ?? []).map((filename) => `/api/inspections/${inspection.id}/images/${encodeURIComponent(filename)}`),
+    report: report ? { id: report.id, generatedAt: report.generatedAt, verdict: report.verdict, score: report.score, triggeredBy: report.triggeredBy, downloadUrl: `/api/reports/${report.id}/download` } : undefined
+  };
+}
+
+function requestRole(req: express.Request): User['role'] | null {
+  return requestUser(req)?.role ?? null;
+}
+
+function requestUser(req: express.Request) {
+  const token = req.header('authorization')?.replace(/^Bearer\s+/i, '');
+  if (!token?.startsWith('demo-token-')) return null;
+  const userId = token.slice('demo-token-'.length);
+  return users.find((user) => user.id === userId && user.active !== false) ?? users.find((user) => user.role === userId && user.active !== false) ?? null;
+}
+
+function requireAdmin(req: express.Request, res: express.Response) {
+  const role = requestRole(req);
+  if (!role) { res.status(401).json({ message: 'Administrator authentication is required' }); return false; }
+  if (role !== 'admin') { res.status(403).json({ message: 'Only administrators can manage officer accounts' }); return false; }
+  return true;
+}
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'metro-check-api' }));
 app.post('/api/auth/login', (req, res) => {
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
-  const user = users.find((candidate) => candidate.email === email && candidate.password === password);
+  const user = users.find((candidate) => candidate.active !== false && candidate.email.toLowerCase() === email && candidate.password === password);
   if (!user) return res.status(401).json({ message: 'Invalid email or password' });
-  return res.json({ user: { id: user.id, name: user.name, role: user.role, email: user.email, orgId: user.orgId }, token: `demo-token-${user.role}` });
+  return res.json({ user: { id: user.id, name: user.name, role: user.role, email: user.email, orgId: user.orgId }, token: `demo-token-${user.id}` });
 });
 app.get('/api/rules', (_req, res) => res.json(rules.map(({ pattern, ...rule }) => ({ ...rule, pattern: pattern.source, settings: ruleSettings.find((setting) => setting.fieldName === rule.fieldName) }))));
 app.put('/api/rules/:fieldName', async (req, res) => {
@@ -46,20 +93,54 @@ app.put('/api/rules/:fieldName', async (req, res) => {
   await writeCollection('rule-settings', ruleSettings);
   return res.json(rule);
 });
-app.get('/api/inspections', (_req, res) => res.json(inspections));
+app.get('/api/inspections', (_req, res) => res.json(inspections.map(inspectionPayload)));
 app.get('/api/analytics', (_req, res) => {
   const total = inspections.length;
   const compliant = inspections.filter((inspection) => inspection.status === 'Compliant').length;
   return res.json({ total, compliant, openCases: total - compliant, complianceRate: total ? Math.round((compliant / total) * 1000) / 10 : 0, activeRules: ruleSettings.filter((rule) => rule.isActive).length });
 });
 app.get('/api/users', (_req, res) => res.json(users.map(({ password: _password, ...user }) => user)));
-app.post('/api/users', (_req, res) => res.status(501).json({ message: 'Officer creation requires database-backed identity management; use the seeded accounts for this demo.' }));
-app.get('/api/products', (_req, res) => res.json(products));
+app.post('/api/users', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const password = typeof req.body.password === 'string' ? req.body.password : '';
+  if (!name || !email || !password) return res.status(400).json({ message: 'Name, email, and password are required' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ message: 'Enter a valid email address' });
+  if (password.length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters' });
+  if (users.some((user) => user.email.toLowerCase() === email)) return res.status(409).json({ message: 'Email already in use' });
+  const officer: User = { id: `user-${Date.now()}`, name, role: 'officer', email, password, orgId: 'district-04', active: true };
+  users.push(officer);
+  await writeCollection('users', users);
+  const { password: _password, ...safeUser } = officer;
+  return res.status(201).json(safeUser);
+});
+app.patch('/api/users/:id', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const user = users.find((candidate) => candidate.id === req.params.id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  if (typeof req.body.name === 'string' && req.body.name.trim()) user.name = req.body.name.trim();
+  if (typeof req.body.active === 'boolean') user.active = req.body.active;
+  await writeCollection('users', users);
+  const { password: _password, ...safeUser } = user;
+  return res.json(safeUser);
+});
+app.get('/api/products', (req, res) => {
+  const user = requestUser(req);
+  const visible = user?.role === 'company' ? products.filter((product) => product.companyId === user.orgId) : products;
+  return res.json(visible);
+});
 app.post('/api/products', async (req, res) => {
+  const user = requestUser(req);
+  if (!user || user.role !== 'company') return res.status(403).json({ message: 'Only a signed-in company account can register products' });
   const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
   const category = typeof req.body.category === 'string' ? req.body.category.trim() : '';
   if (!name || !category) return res.status(400).json({ message: 'Product name and category are required' });
-  const product: Product = { id: `product-${Date.now()}`, companyId: typeof req.body.companyId === 'string' ? req.body.companyId : 'company-kaveri', name, category, status: 'Pending self-check' };
+  const declaredMrp = req.body.declaredMrp === undefined || req.body.declaredMrp === '' ? undefined : Number(req.body.declaredMrp);
+  const declaredNetQuantity = req.body.declaredNetQuantity === undefined || req.body.declaredNetQuantity === '' ? undefined : Number(req.body.declaredNetQuantity);
+  if (declaredMrp !== undefined && (!Number.isFinite(declaredMrp) || declaredMrp < 0)) return res.status(400).json({ message: 'Registered MRP must be a valid positive number' });
+  if (declaredNetQuantity !== undefined && (!Number.isFinite(declaredNetQuantity) || declaredNetQuantity <= 0)) return res.status(400).json({ message: 'Registered net quantity must be a valid positive number' });
+  const product: Product = { id: `product-${Date.now()}`, companyId: user.orgId, name, category, status: 'Pending self-check', declaredMrp, declaredNetQuantity, declaredNetUnit: typeof req.body.declaredNetUnit === 'string' ? req.body.declaredNetUnit.trim() : undefined, manufacturerDetails: typeof req.body.manufacturerDetails === 'string' ? req.body.manufacturerDetails.trim() : undefined, consumerCareDetails: typeof req.body.consumerCareDetails === 'string' ? req.body.consumerCareDetails.trim() : undefined };
   products.unshift(product);
   await writeCollection('products', products);
   return res.status(201).json(product);
@@ -71,8 +152,8 @@ app.delete('/api/products/:id', async (req, res) => {
   await writeCollection('products', products);
   return res.json(removed);
 });
-app.get('/api/notifications', (_req, res) => res.json(notifications));
-app.post('/api/notifications/read-all', async (_req, res) => { notifications.forEach((notification) => { notification.read = true; }); await writeCollection('notifications', notifications); return res.json(notifications); });
+app.get('/api/notifications', (req, res) => { const user = requestUser(req); const visible = user?.role === 'company' ? notifications.filter((notification) => !notification.companyId || notification.companyId === user.orgId) : notifications; return res.json(visible); });
+app.post('/api/notifications/read-all', async (req, res) => { const user = requestUser(req); notifications.forEach((notification) => { if (user?.role !== 'company' || !notification.companyId || notification.companyId === user.orgId) notification.read = true; }); await writeCollection('notifications', notifications); return res.json(notifications); });
 
 app.post('/api/scan', upload.array('images', 4), async (req, res) => {
   const suppliedText = typeof req.body.ocrText === 'string' ? req.body.ocrText : '';
@@ -84,23 +165,59 @@ app.post('/api/scan', upload.array('images', 4), async (req, res) => {
     console.error('OCR processing failed', error);
     return res.status(422).json({ message: 'OCR could not read the supplied label image. Try a sharper JPG or PNG.' });
   }
+  const actor = requestUser(req);
+  if (!actor || !['officer', 'admin', 'company'].includes(actor.role)) return res.status(401).json({ message: 'A signed-in officer, administrator, or company account is required to run a scan' });
+  const companyId = actor?.role === 'company' ? actor.orgId : (typeof req.body.companyId === 'string' && req.body.companyId) || 'company-kaveri';
+  const productId = typeof req.body.productId === 'string' ? req.body.productId : 'product-001';
+  if (actor?.role === 'company' && req.body.companyId && req.body.companyId !== actor.orgId) return res.status(403).json({ message: 'Company self-checks can only use your company record' });
+  const product = productId ? products.find((candidate) => candidate.id === productId && candidate.companyId === companyId) : undefined;
+  const companyName = companyId === 'company-kaveri' ? 'Kaveri Homecare' : companyId === 'company-bharat' ? 'Bharat Foods Pvt Ltd' : companyId;
   const ocrText = extractedText || 'MRP Rs. 120\nNET QUANTITY 500 g\nMFG: 04/2026\nMfd by: Bharat Foods Pvt Ltd\nCustomer Care: 1800 123 4567';
   const activeRules = rules
     .map((rule) => ({ ...rule, minFontSizeMm: ruleSettings.find((setting) => setting.fieldName === rule.fieldName)?.minFontSizeMm ?? rule.minFontSizeMm }))
     .filter((rule) => ruleSettings.find((setting) => setting.fieldName === rule.fieldName)?.isActive ?? true);
-  const checks = runRuleEngine(ocrText, activeRules);
-  const summary = summarizeChecks(checks);
-  const inspection: Inspection = { id: `INSP-${2409 + inspections.length}`, company: typeof req.body.company === 'string' ? req.body.company : 'Unassigned company', product: typeof req.body.product === 'string' ? req.body.product : 'Uploaded label', status: summary.isCompliant ? 'Compliant' : 'Action required', score: Math.round((summary.passed / summary.total) * 100), createdAt: new Date().toISOString(), checks, ocrText, summary };
+  const formatChecks = runRuleEngine(ocrText, activeRules);
+  const checks = compareChecks(formatChecks, product);
+  const passedChecks = checks.filter((check) => check.isCompliant && check.comparisonStatus !== 'mismatch').length;
+  const summary = { passed: passedChecks, failed: checks.length - passedChecks, total: checks.length, isCompliant: passedChecks === checks.length };
+  const createdAt = new Date().toISOString();
+  const inspectionId = `INSP-${2409 + inspections.length}`;
+  await fs.mkdir(labelDirectory, { recursive: true });
+  const labelImages: string[] = [];
+  for (const [index, file] of files.entries()) {
+    const filename = `${inspectionId}-${index}-${path.basename(file.originalname).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    await fs.rename(file.path, path.join(labelDirectory, filename));
+    labelImages.push(filename);
+  }
+  const inspection: Inspection = { id: inspectionId, company: typeof req.body.company === 'string' ? req.body.company : companyName, companyId, product: typeof req.body.product === 'string' ? req.body.product : product?.name ?? 'Uploaded label', productId: product?.id ?? productId, status: summary.isCompliant ? 'Compliant' : 'Action required', score: Math.round((summary.passed / summary.total) * 100), createdAt, checks, ocrText, summary, labelImages };
   inspections.unshift(inspection);
   await writeCollection('inspections', inspections);
-  res.status(201).json(inspection);
+  const reportId = `RPT-${Date.now()}`;
+  const pdfPath = await generateCompliancePdf({ reportId, inspectionId: inspection.id, companyName, companyId, productName: inspection.product, productCategory: product?.category ?? 'Unregistered', actorLabel: actor?.role === 'company' ? 'Company self-check' : actor?.name ?? 'Enforcement inspection', createdAt, status: inspection.status, score: inspection.score, checks, imagePaths: labelImages.map((filename) => path.join(labelDirectory, filename)) }, path.resolve(__dirname, '../reports'));
+  const report: Report = { id: reportId, inspectionId: inspection.id, companyId, productId: product?.id ?? productId, companyName, productName: inspection.product, productCategory: product?.category ?? 'Unregistered', triggeredBy: actor?.role === 'company' ? 'Company self-check' : actor?.name ?? 'Enforcement inspection', generatedAt: createdAt, verdict: inspection.status, score: inspection.score, pdfPath };
+  reports.unshift(report);
+  await writeCollection('reports', reports);
+  if (actor?.role !== 'company') { notifications.unshift({ id: `notification-${Date.now()}`, title: inspection.status === 'Compliant' ? 'Inspection report available' : 'Action required', text: `${inspection.product} was inspected and a report is ready`, when: 'Just now', tone: inspection.status === 'Compliant' ? 'info' : 'warning', read: false, companyId, inspectionId: inspection.id }); await writeCollection('notifications', notifications); }
+  res.status(201).json(inspectionPayload(inspection));
 });
 
 app.get('/api/inspections/:id', (req, res) => {
   const inspection = inspections.find((item) => item.id === req.params.id);
   if (!inspection) return res.status(404).json({ message: 'Inspection not found' });
-  return res.json(inspection);
+  return res.json(inspectionPayload(inspection));
 });
+app.get('/api/inspections/:id/images/:filename', (req, res) => {
+  const user = requestUser(req);
+  const inspection = inspections.find((item) => item.id === req.params.id);
+  if (!user) return res.status(401).json({ message: 'Authentication is required' });
+  if (!inspection) return res.status(404).json({ message: 'Inspection not found' });
+  if (user.role === 'company' && inspection.companyId !== user.orgId) return res.status(403).json({ message: 'You can only access your company images' });
+  if (!inspection.labelImages?.includes(req.params.filename)) return res.status(404).json({ message: 'Label image not found' });
+  return res.sendFile(path.join(labelDirectory, req.params.filename));
+});
+app.get('/api/reports', (req, res) => { const user = requestUser(req); if (!user) return res.status(401).json({ message: 'Authentication is required' }); const visible = user.role === 'company' ? reports.filter((report) => report.companyId === user.orgId) : reports; return res.json(visible.map(({ pdfPath: _pdfPath, ...report }) => ({ ...report, downloadUrl: `/api/reports/${report.id}/download` }))); });
+app.get('/api/reports/:id/download', async (req, res) => { const user = requestUser(req); if (!user) return res.status(401).json({ message: 'Authentication is required' }); const report = reports.find((candidate) => candidate.id === req.params.id); if (!report) return res.status(404).json({ message: 'Report not found' }); if (user.role === 'company' && report.companyId !== user.orgId) return res.status(403).json({ message: 'You can only access reports for your company' }); res.download(report.pdfPath, `${report.id}.pdf`); });
+app.get('/api/companies/:companyId/reports', (req, res) => { const user = requestUser(req); if (!user) return res.status(401).json({ message: 'Authentication is required' }); if (user.role === 'company' && user.orgId !== req.params.companyId) return res.status(403).json({ message: 'You can only access your company reports' }); return res.json(reports.filter((report) => report.companyId === req.params.companyId).map(({ pdfPath: _pdfPath, ...report }) => ({ ...report, downloadUrl: `/api/reports/${report.id}/download` }))); });
 app.post('/api/inspections/:id/evidence', upload.array('evidence', 4), async (req, res) => {
   const inspection = inspections.find((item) => item.id === req.params.id);
   if (!inspection) return res.status(404).json({ message: 'Inspection not found' });

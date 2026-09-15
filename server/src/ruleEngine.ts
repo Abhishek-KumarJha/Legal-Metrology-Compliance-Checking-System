@@ -13,7 +13,7 @@ export type CheckResult = {
 export function runRuleEngine(ocrText: string, activeRules: Rule[] = rules): CheckResult[] {
   return activeRules.map((rule) => {
     const match = ocrText.match(rule.pattern);
-    const detectedValue = match?.[1]?.trim() ?? null;
+    const detectedValue = match ? (rule.fieldName === 'netQuantity' ? match[0].match(/([0-9]+(?:\.[0-9]+)?)\s*(kg|g|gm|mg|l|litre|ml)/i)?.[0] ?? match[1]?.trim() : match[1]?.trim() ?? null) : null;
     return {
       fieldName: rule.fieldName,
       label: rule.label,
