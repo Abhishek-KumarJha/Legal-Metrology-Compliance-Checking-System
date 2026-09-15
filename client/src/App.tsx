@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Activity, AlertTriangle, Archive, ArrowUpRight, BadgeCheck, BarChart3, Bell, Camera, Check, ChevronRight, ClipboardCheck, FileText, Filter, LayoutDashboard, Menu, Package, Plus, Search, Settings2, ShieldCheck, Upload, Users, X } from 'lucide-react';
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import CompanyPortal from './CompanyDashboard';
 
 type CheckResult = { fieldName: string; label: string; detectedValue: string | null; isCompliant: boolean; ruleSection: string; confidenceNote: string; minFontSizeMm: number };
 type Inspection = { id: string; company: string; product: string; status: string; score: number; createdAt: string; checks?: CheckResult[]; summary?: { passed: number; failed: number; total: number; isCompliant: boolean }; ocrText?: string };
@@ -10,7 +11,11 @@ type Role = 'officer' | 'admin' | 'company';
 type AuthUser = { id: string; name: string; role: Role; email: string; orgId: string };
 
 async function apiRequest<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, options);
+  const storedUser = localStorage.getItem('metro-check-user');
+  const user = storedUser ? JSON.parse(storedUser) as { id?: string } : {};
+  const headers = new Headers(options?.headers);
+  if (user.id) headers.set('x-user-id', user.id);
+  const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.message ?? `Request failed (${response.status})`);
   return body as T;
@@ -47,7 +52,7 @@ export default function App() {
   if (!authenticated || !user) return <Login onLogin={(nextUser) => { localStorage.setItem('metro-check-user', JSON.stringify(nextUser)); setUser(nextUser); window.history.replaceState({}, '', `/${nextUser.role}/dashboard`); }} />;
 
   if (user.role === 'admin') return <ConnectedAdminDashboard user={user} onLogout={logout} />;
-  if (user.role === 'company') return <ConnectedCompanyDashboard user={user} onLogout={logout} />;
+  if (user.role === 'company') return <CompanyPortal user={user} onLogout={logout} />;
 
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''}`}>
