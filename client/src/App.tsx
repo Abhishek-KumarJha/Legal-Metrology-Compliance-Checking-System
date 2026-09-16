@@ -169,6 +169,7 @@ export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">(() =>
     localStorage.getItem("metro-check-theme") === "dark" ? "dark" : "light",
   );
+  const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -205,18 +206,51 @@ export default function App() {
     setRescanInspection(null);
     setView("scan");
   };
-  const logout = () => {
+  const confirmLogout = () => {
     localStorage.removeItem("metro-check-user");
     localStorage.removeItem("metro-check-token");
     sessionStorage.removeItem("metro-check-user");
+    setShowLogoutConfirmation(false);
     setUser(null);
     window.history.replaceState({}, "", "/");
   };
+  const logout = () => setShowLogoutConfirmation(true);
   const toggleTheme = () =>
     setTheme((current) => (current === "light" ? "dark" : "light"));
   const themed = (content: React.ReactNode) => (
     <ThemeContext.Provider value={{ theme, toggle: toggleTheme }}>
       {content}
+      {showLogoutConfirmation && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sign-out-title"
+            aria-describedby="sign-out-message"
+          >
+            <div className="confirm-icon">
+              <AlertTriangle size={22} />
+            </div>
+            <span className="eyebrow">CONFIRM SIGN OUT</span>
+            <h2 id="sign-out-title">Sign out of Metro-Check?</h2>
+            <p id="sign-out-message">
+              Are you sure you want to sign out of your account?
+            </p>
+            <div className="confirm-actions">
+              <button
+                className="button ghost"
+                onClick={() => setShowLogoutConfirmation(false)}
+              >
+                No
+              </button>
+              <button className="button danger" onClick={confirmLogout}>
+                Yes, sign out
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </ThemeContext.Provider>
   );
 
