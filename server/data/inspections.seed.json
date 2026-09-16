@@ -1,5 +1,1 @@
-[
-  { "id": "INSP-2408", "company": "Bharat Foods Pvt Ltd", "product": "Sunrise Mustard Oil", "status": "Compliant", "score": 100, "createdAt": "2026-09-12T09:20:00.000Z", "checks": [] },
-  { "id": "INSP-2407", "company": "Nourish Naturals", "product": "A2 Cow Ghee", "status": "Action required", "score": 60, "createdAt": "2026-09-11T14:05:00.000Z", "checks": [] },
-  { "id": "INSP-2406", "company": "Kaveri Homecare", "product": "Lemon Floor Cleaner", "status": "Action required", "score": 80, "createdAt": "2026-09-10T11:35:00.000Z", "checks": [] }
-]
+[]

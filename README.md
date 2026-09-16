@@ -2,21 +2,27 @@
 
 Metro-Check is an explainable Legal Metrology compliance checker for packaged commodities in India. It helps enforcement officers, administrators, and manufacturers inspect label declarations against the Legal Metrology (Packaged Commodities) Rules, 2011.
 
+The system architecture, role boundaries, OCR/readability limits, and deployment path are documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+
 The system is deliberately transparent: OCR extracts text, a configurable rule registry detects mandatory declarations, and every result includes the detected value, pass/fail state, confidence note, and cited rule section.
 
 ## Current capabilities
 
 - Role-based demo login for enforcement officers, administrators, and companies
 - Mobile-first label scan flow with multi-image upload
-- Tesseract.js OCR with deterministic fallback text for local demos
+- Tesseract.js OCR with an explicitly flagged, opt-in deterministic fallback for local demos
 - Regex-based checks for MRP, net quantity, date marking, manufacturer details, and consumer care
 - Persisted local development collections for inspections, products, notifications, and rule settings
 - Evidence image upload attached to inspections
-- Searchable inspection history with status filtering
+- Searchable inspection history with status, violation-type, and date-range filtering
 - Administrator analytics computed from the inspection register
 - Editable minimum font thresholds and active rule states
 - Company self-check workflow
-- JSON inspection/report export
+- PDF and editable DOCX inspection/report export
+- Editable JSON report endpoint for authorized users
+- OCR confidence and recognized text-height readability metadata
+- Basic OCR preprocessing: orientation correction, grayscale, contrast normalization, sharpening, and resolution upscaling
+- Inspection case notes, resubmission state, and officer/admin case updates
 - Sample label fixtures under `public/fixtures/`
 
 ## Technology
@@ -36,6 +42,8 @@ The system is deliberately transparent: OCR extracts text, a configurable rule r
 - npm
 
 ## Run locally
+
+For the team branch and Pull Request workflow, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 From the repository root:
 
@@ -93,7 +101,10 @@ npm run build --prefix server
 | `GET` | `/api/inspections` | List persisted inspections |
 | `POST` | `/api/scan` | Upload label images and run OCR/rules |
 | `GET` | `/api/inspections/:id` | Read one inspection |
+| `PATCH` | `/api/inspections/:id/checks/:fieldName` | Manually verify an uncertain declaration |
 | `POST` | `/api/inspections/:id/evidence` | Attach evidence images |
+| `GET` | `/api/reports/:id/download` | Download a PDF report |
+| `GET` | `/api/reports/:id/docx` | Download an editable DOCX report |
 | `GET` | `/api/rules` | Read active rule configuration |
 | `PUT` | `/api/rules/:fieldName` | Update threshold or active state |
 | `GET` | `/api/analytics` | Return computed register metrics |
@@ -120,9 +131,19 @@ Each rule defines:
 
 The scan endpoint runs every active rule and returns structured `CheckResult` objects. The engine is intentionally deterministic and inspectable; it does not train or require a custom ML model.
 
+### OCR demo fallback safety
+
+The canned sample text is used only when `DEMO_OCR_FALLBACK=true` and `NODE_ENV` is not `production`. Its response includes `ocrFallbackUsed: true`, and the web report and PDF display a demo-mode warning. A real photo that produces empty or low-confidence OCR is never replaced silently: production and normal development mode return a readable OCR error or preserve the real low-confidence OCR result.
+
+### Readability and text-size limitation
+
+OCR word bounding boxes report recognized text height in pixels. Metro-Check displays that signal as an estimated readability measure only; it is not a calibrated millimetre measurement. A production-grade legal font-size decision requires a known reference object or package dimensions in the image, camera calibration, and validation against the physical package. Low OCR confidence or very small recognized text is reported as `Review required` with a retake recommendation rather than being presented as a definite legal violation.
+
 ## Data and production migration
 
 Local development uses atomic JSON writes through `server/src/store.ts`. Runtime collections are ignored by Git so a fresh checkout starts from the seed files. The production data model is documented in `server/data/schema.prisma` and covers users, companies, products, inspections, declaration checks, reports, and configurable rules.
+
+This submission is intentionally a local prototype: JSON persistence, local-disk uploads, demo credentials, and the deterministic Tesseract.js fallback are for the hackathon walkthrough. They are not production-ready substitutes for PostgreSQL, hashed-password or OIDC authentication, object storage, upload scanning, retention controls, and operational monitoring.
 
 Before production deployment, replace the local store with Prisma/PostgreSQL repositories and add:
 
