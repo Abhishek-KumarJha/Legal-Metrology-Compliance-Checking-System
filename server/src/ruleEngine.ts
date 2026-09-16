@@ -77,9 +77,8 @@ export function assessNumericEvidence(fieldName: string, value: string | null, s
   const sourceNumeric = sourceTokens.filter((token) => /\d/.test(token));
   const sourceDigits = sourceNumeric.reduce((sum, token) => sum + (token.match(/\d/g) ?? []).length, 0);
   const digitCountPlausible = sourceDigits === 0 || sourceDigits >= valueDigits;
-  // A punctuation mark between digits can represent a decimal, OCR dash,
-  // comma, or an unclear print artifact. Preserve it as review-required.
-  const separatorUnambiguous = fieldName !== 'mrp' || !/\d\s*[.,-]\s*\d/.test(sourceText);
+  // A standard decimal point is clear; OCR dashes, commas, or split digits remain review-required.
+  const separatorUnambiguous = fieldName !== 'mrp' || !/\d(?:\s+|-|,)\s*\d/.test(sourceText);
   const structuralCheckPassed = fieldName === 'date' ? /(?:MFG|MFD|MANUF|PKD|PACK|EXP|BEST|USE)/i.test(sourceText) : fieldName === 'netQuantity' ? /(?:NET|QTY|QUANTITY|WEIGHT|CONTENTS)|\b(?:g|kg|ml|l|n|nos|pieces?)\b/i.test(sourceText) : /(?:MRP|PRICE|₹|Rs\.?|INR)/i.test(sourceText);
   const failures = [!digitCountPlausible ? 'OCR digit count does not match the numeric evidence' : '', !separatorUnambiguous ? 'Currency separator is ambiguous in the OCR source' : '', !structuralCheckPassed ? 'Numeric value lacks a structural field anchor' : ''].filter(Boolean);
   return { digitCountPlausible, separatorUnambiguous, structuralCheckPassed, reviewReason: failures.join('; ') || undefined };

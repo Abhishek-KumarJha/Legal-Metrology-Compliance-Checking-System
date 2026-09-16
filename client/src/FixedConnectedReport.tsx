@@ -267,14 +267,10 @@ export default function FixedConnectedReport({
           {inspection.notes && <small>{inspection.notes}</small>}
         </div>
         <div className="result-score">
-          <strong>
-            {inspection.status === "Review required"
-              ? "—"
-              : `${inspection.score}%`}
-          </strong>
+          <strong>{inspection.score}%</strong>
           <span>
             {inspection.status === "Review required"
-              ? "not scored"
+              ? "provisional score"
               : "compliance score"}
           </span>
         </div>
