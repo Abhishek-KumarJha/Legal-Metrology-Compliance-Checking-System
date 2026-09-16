@@ -22,6 +22,7 @@ assert.equal(runRuleEngine('Distributed by: Acme Retail Pvt Ltd').find((check) =
 assert.equal(runRuleEngine('Manufactured & Packed by: HarvestGold Foods Pvt Ltd').find((check) => check.fieldName === 'manufacturer')?.isCompliant, true);
 assert.equal(runRuleEngine('Packed FEB 2027 by II\nBiscuits HarvestGold Foods Pvt. Ltd').find((check) => check.fieldName === 'manufacturer')?.isCompliant, true);
 assert.equal(runRuleEngine('Manufactured GaiaFresh Foods Packed Pvt. Ltd. by:').find((check) => check.fieldName === 'manufacturer')?.detectedValue, 'GaiaFresh Foods');
+assert.equal(runRuleEngine('15 est Best Batch Manufactured Before No 12 HG260812 Packed FEB 2027 by II\nBiscuits HarvestGold Foods Pvt. Ltd').find((check) => check.fieldName === 'manufacturer')?.detectedValue, 'HarvestGold Foods Pvt. Ltd');
 assert.equal(runRuleEngine('MRP 180.00 Plot No. 12, Agro Park').find((check) => check.fieldName === 'manufacturer')?.isCompliant, false);
 assert.equal(runRuleEngine('Net Weight: 295 g\nProtein: 15.8 g').find((check) => check.fieldName === 'netQuantity')?.detectedValue, '295 g');
 const garbageQuantity = runRuleEngine('Net Quantity il');

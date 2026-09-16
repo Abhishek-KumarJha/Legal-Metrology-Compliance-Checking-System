@@ -88,6 +88,56 @@ export function validationChecksForNumericEvidence(evidence?: NumericEvidence) {
   return evidence ? { digit_count_ok: evidence.digitCountPlausible, decimal_clear: evidence.separatorUnambiguous, proximity_ok: evidence.structuralCheckPassed, width_plausible: evidence.widthPlausible ?? evidence.digitCountPlausible } : undefined;
 }
 
+function looksLikeManufacturerValue(value: string | null) {
+  if (!value) return false;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (!normalized || normalized.length < 3) return false;
+  if (/^(?:ii|iii|iv|v|before|batch|best|date|lot|no|mfg|mfd|pack(?:ed|er)?|manufactur(?:ed|ing)?|by)\b/i.test(normalized)) return false;
+  if (/^(?:before|batch|best|date|lot|no|mfg|mfd|pack(?:ed|er)?|manufactur(?:ed|ing)?|by)\b.*$/i.test(normalized)) return false;
+  if (/\b(?:pvt\.?\s*ltd\.?|private\s*limited|limited|inc\.?|corp\.?|company|industr(?:y|ial)|traders?|foods?|mills?|home\s*care|beverages?|enterprises?|packers?|manufactur(?:er|ing)|pharma|solutions?)\b/i.test(normalized)) return true;
+  const alphaWords = normalized.match(/[A-Za-z]{3,}/g) ?? [];
+  return alphaWords.length >= 2 && !/^(?:before|batch|lot|no|date|packed|manufactured)\b/i.test(normalized);
+}
+
+function normalizeManufacturerValue(value: string | null) {
+  if (!value) return null;
+  let normalized = value.replace(/\s+/g, ' ').replace(/[\r\n]+/g, ' ').trim();
+  normalized = normalized.replace(/^(?:by|manufactur(?:ed|ing)?|packed|pack(?:ed|er)?|marketed|imported|distributed)\s*[:.-]?\s*/i, '');
+  normalized = normalized.replace(/\s*(?:by|manufactur(?:ed|ing)?|packed|pack(?:ed|er)?|marketed|imported|distributed)\s*$/i, '');
+  normalized = normalized.replace(/^\s*[-••\u2022\*]+\s*/, '');
+  normalized = normalized.replace(/^\s*(?:biscuits?|cookies?|wafers?|snacks?|foods?|products?|brand|premium|digestive|health|bakery)\s+/i, '');
+  normalized = normalized.replace(/\s+(?:packed|packer|manufactur(?:ed|ing)?|mfd|mfg|by)\s*$/i, '');
+  return normalized.trim();
+}
+
+function findManufacturerCandidate(text: string) {
+  const lines = text.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const labelledByMatch = line.match(/\b(?:MFD?\.?|MFG\.?|MANUFACTURED|PACK(?:ED|ER)?|MARKETED|IMPORTED|DISTRIBUTED|MANUFACTURER)\b[\s\S]{0,120}?\bBY\b\s*[:.-]?\s*([A-Za-z0-9][^\n]*)/i);
+    if (labelledByMatch) {
+      const candidate = normalizeManufacturerValue(labelledByMatch[1].replace(/^[^A-Za-z]+/, '').trim());
+      if (candidate && looksLikeManufacturerValue(candidate)) return candidate;
+      const nextLine = normalizeManufacturerValue(lines[index + 1]?.trim());
+      if (nextLine && looksLikeManufacturerValue(nextLine)) return nextLine;
+    }
+    if (/\b(?:MFD?\.?|MFG\.?|MANUFACTURED|PACK(?:ED|ER)?|MARKETED|IMPORTED|DISTRIBUTED|MANUFACTURER)\b/i.test(line)) {
+      const directCandidate = normalizeManufacturerValue(line.replace(/^[^A-Za-z]+/, '').replace(/\b(?:MFD?\.?|MFG\.?|MANUFACTURED|PACK(?:ED|ER)?|MARKETED|IMPORTED|DISTRIBUTED|MANUFACTURER)\b\s*[:.-]?\s*/i, '').trim());
+      if (directCandidate && looksLikeManufacturerValue(directCandidate)) return directCandidate;
+    }
+  }
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/\bBY\b/i.test(line) && !/\b(?:before|best|batch|lot|date|expiry|mfg|mfd|packed)\b/i.test(line)) {
+      const candidate = normalizeManufacturerValue(line.split(/\bBY\b/i).slice(1).join(' ').trim().replace(/^[^A-Za-z]+/, '').trim());
+      if (candidate && looksLikeManufacturerValue(candidate)) return candidate;
+      const nextLine = normalizeManufacturerValue(lines[index + 1]?.trim());
+      if (nextLine && looksLikeManufacturerValue(nextLine)) return nextLine;
+    }
+  }
+  return null;
+}
+
 export function runRuleEngine(ocrText: string, activeRules: Rule[] = rules): CheckResult[] {
   return activeRules.map((rule) => {
     const matches = [...ocrText.matchAll(new RegExp(rule.pattern.source, `${rule.pattern.flags.replace('g', '')}g`))];
@@ -97,7 +147,23 @@ export function runRuleEngine(ocrText: string, activeRules: Rule[] = rules): Che
     const normalizeNumber = (value: string) => value.replace(/[Oo]/g, '0').replace(/[Il]/g, '1');
     const captures = match?.slice(1).filter(Boolean) ?? [];
     const normalizePrice = (value: string) => normalizeNumber(value.trim()).replace(',', '.').replace(/(\d+)[\s-](?=\d{2}(?:\D|$))/, '$1.');
-    const rawDetectedValue = match ? (rule.fieldName === 'netQuantity' ? match[0].match(/(?:^|[^A-Za-z])([0-9OIl]+(?:[.,-][0-9OIl]+)?)\s*(kg|litre|gm|mg|ml|g|l|n|nos|pieces?|tablets?)\b/i)?.[0].trim().replace(/^([0-9OIl]+)/, (value) => normalizeNumber(value)).replace(',', '.').replace(/(\d+)-(?=\d{1,2}(?:\D|$))/, '$1.') ?? captures[0]?.trim() : rule.fieldName === 'mrp' ? normalizePrice(captures[0] ?? '') : rule.fieldName === 'consumerCare' ? match[0].replace(/\s+/g, ' ').trim() : captures[0]?.trim() ?? null) : null;
+    const manufacturerFallback = rule.fieldName === 'manufacturer' ? findManufacturerCandidate(ocrText) : null;
+    const dateCandidate = (() => {
+      if (rule.fieldName !== 'date') return null;
+      const preferredCapture = captures.find((candidate) => typeof candidate === 'string' && candidate.trim().length > 0 && /\d|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|days?|months?|years?|manufactur(?:e|ing)?/i.test(candidate));
+      const base = (preferredCapture ?? captures[0] ?? match?.[0] ?? '').trim();
+      if (!base) return null;
+      const cleaned = base.replace(/^(?:MFG|MFD|MANUF|PKD|PACKED|PACKED\s*ON|MANUFACTURED|MANUFACTURING\s*DATE|BEST\s*BEFORE|USE\s*BY|EXP(?:IRY)?)\s*[:.-]?\s*/i, '').trim();
+      if (/\b(?:days?|months?|years?)\b.*\b(?:from|after|of)\b/i.test(cleaned) && /\bmanufactur(?:e|ing)?\b/i.test(ocrText) && !/\bmanufactur(?:e|ing)?\b/i.test(cleaned)) {
+        const suffix = ocrText.match(/\b(?:days?|months?|years?)\b\s+(?:from|after|of)\s+(?:the\s+)?(?:manufactur(?:e|ing)?|mfg|mfd|pack|packaging|pkd|open|opening)[^\n]*/i)?.[0];
+        if (suffix) return suffix.trim();
+      }
+      return cleaned || base;
+    })();
+    const rawMatchValue = match ? (rule.fieldName === 'netQuantity' ? match[0].match(/(?:^|[^A-Za-z])([0-9OIl]+(?:[.,-][0-9OIl]+)?)\s*(kg|litre|gm|mg|ml|g|l|n|nos|pieces?|tablets?)\b/i)?.[0].trim().replace(/^([0-9OIl]+)/, (value) => normalizeNumber(value)).replace(',', '.').replace(/(\d+)-(?=\d{1,2}(?:\D|$))/, '$1.') ?? captures[0]?.trim() : rule.fieldName === 'mrp' ? normalizePrice(captures[0] ?? '') : rule.fieldName === 'consumerCare' ? match[0].replace(/\s+/g, ' ').trim() : rule.fieldName === 'date' ? dateCandidate : normalizeManufacturerValue(captures[0]?.trim() ?? null) ?? null) : null;
+    const rawDetectedValue = rule.fieldName === 'manufacturer'
+      ? ((looksLikeManufacturerValue(rawMatchValue) ? rawMatchValue : null) ?? manufacturerFallback ?? rawMatchValue)
+      : rawMatchValue;
     const detectedValue = rawDetectedValue;
     const validValue = Boolean(rawDetectedValue && isSaneValue(rule.fieldName, rawDetectedValue));
     const invalidMatch = Boolean(rawDetectedValue) && !validValue;

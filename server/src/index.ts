@@ -45,13 +45,15 @@ for (const seedProduct of productSeed as Product[]) {
 }
 await writeCollection('products', products);
 const notifications = await readCollection<Notification>('notifications', notificationSeed as Notification[]);
-const defaultRuleSettings = rules.map((rule): RuleSetting => ({ fieldName: rule.fieldName, minFontSizeMm: rule.minFontSizeMm, isActive: true, readabilityThreshold: 60, verificationThreshold: 85 }));
+const defaultRuleSettings = rules.map((rule): RuleSetting => ({ fieldName: rule.fieldName, minFontSizeMm: rule.minFontSizeMm, isActive: true, readabilityThreshold: 60, verificationThreshold: rule.fieldName === 'consumerCare' ? 75 : 85 }));
 const ruleSettings = await readCollection<RuleSetting>('rule-settings', defaultRuleSettings);
 for (const defaultSetting of defaultRuleSettings) {
   const existing = ruleSettings.find((setting) => setting.fieldName === defaultSetting.fieldName);
   if (existing) {
     existing.readabilityThreshold ??= defaultSetting.readabilityThreshold;
-    existing.verificationThreshold ??= defaultSetting.verificationThreshold;
+    existing.verificationThreshold = existing.fieldName === 'consumerCare'
+      ? Math.min(existing.verificationThreshold ?? defaultSetting.verificationThreshold, defaultSetting.verificationThreshold)
+      : existing.verificationThreshold ?? defaultSetting.verificationThreshold;
   } else ruleSettings.push(defaultSetting);
 }
 const users = await readCollection<User>('users', userSeed as User[]);
@@ -353,6 +355,7 @@ app.post('/api/scan', upload.array('images', 4), async (req, res) => {
   const panelClassificationIsExplicit = providedPanels.length > 0 && providedPanels.every((panel) => panel === 'principal' || panel === 'declarations');
   const panelChecks = await Promise.all(activeRules.map(async (rule) => {
     const setting = ruleSettings.find((candidateSetting) => candidateSetting.fieldName === rule.fieldName) ?? defaultRuleSettings.find((candidateSetting) => candidateSetting.fieldName === rule.fieldName)!;
+    const effectiveVerificationThreshold = rule.fieldName === 'consumerCare' ? Math.min(setting.verificationThreshold, 75) : setting.verificationThreshold;
     const pageCandidates = (await Promise.all(ocrAnalysis.pages.map(async (page, sourceImageIndex) => {
       // Panel labels are hints only. Every reconstructed OCR line is searched;
       // declaration filtering must never hide a valid field on another panel.
@@ -385,7 +388,7 @@ app.post('/api/scan', upload.array('images', 4), async (req, res) => {
         const numericCharacterCount = (candidate.detectedValue?.replace(/\s/g, '').length ?? 0);
         const widthRatio = fieldEvidence.boundingBox && fieldEvidence.boundingBox.height > 0 ? fieldEvidence.boundingBox.width / fieldEvidence.boundingBox.height : 0;
         const widthMismatch = ['mrp', 'netQuantity', 'date'].includes(rule.fieldName) && Boolean(candidate.detectedValue && fieldEvidence.boundingBox && widthRatio > numericCharacterCount * 0.55 + 0.5);
-        const numericAmbiguous = Boolean(candidate.detectedValue && ['mrp', 'netQuantity', 'date'].includes(rule.fieldName) && (numericReviewRequired || widthMismatch || (fieldEvidence.confidence ?? 100) < setting.verificationThreshold));
+        const numericAmbiguous = Boolean(candidate.detectedValue && ['mrp', 'netQuantity', 'date'].includes(rule.fieldName) && (numericReviewRequired || widthMismatch || (fieldEvidence.confidence ?? 100) < effectiveVerificationThreshold));
         const numericReExtraction = (process.env.OCR_PROVIDER === 'paddle' || process.env.OCR_FAST === 'false') && numericAmbiguous && fieldEvidence.boundingBox && files[sourceImageIndex]
           ? await reextractNumericRegion(files[sourceImageIndex].path, { ...fieldEvidence.boundingBox, coordinateWidth: page.width, coordinateHeight: page.height }, rule.fieldName, candidate.detectedValue!)
           : undefined;
@@ -399,13 +402,13 @@ app.post('/api/scan', upload.array('images', 4), async (req, res) => {
           : page.imageQuality.overallQuality === 'UNUSABLE' ? 40 : page.imageQuality.overallQuality === 'POOR' ? 60 : page.imageQuality.overallQuality === 'FAIR' ? 79 : 100;
         const resolvedConfidence = Math.min(numericReExtraction?.confidence_per_pass.length ? Math.max(...numericReExtraction.confidence_per_pass) : fieldEvidence.confidence ?? 0, qualityConfidenceCap);
         const reExtractionVerified = numericReExtraction?.resolution_method === 'auto_resolved'
-          && resolvedConfidence >= setting.verificationThreshold
+          && resolvedConfidence >= effectiveVerificationThreshold
           && !imageUnusable;
         const resolvedEvidence = numericReExtraction?.resolution_method === 'auto_resolved' && reExtractionVerified
           ? { digitCountPlausible: true, separatorUnambiguous: true, structuralCheckPassed: true, widthPlausible: true }
           : numericReExtraction ? { digitCountPlausible: numericEvidence?.digitCountPlausible ?? false, separatorUnambiguous: numericEvidence?.separatorUnambiguous ?? false, structuralCheckPassed: numericEvidence?.structuralCheckPassed ?? false, widthPlausible: false, reviewReason: `${numericEvidence?.reviewReason ?? 'Numeric re-extraction did not converge'} Candidate reads: ${numericReExtraction.candidate_reads.join(', ') || 'none'}.` } : numericEvidence;
         const status = candidate.isCompliant && !numericReviewRequired
-          ? classifyEvidenceStatus(true, Math.min(fieldEvidence.confidence ?? 0, qualityConfidenceCap), imageUnusable, setting.verificationThreshold)
+          ? classifyEvidenceStatus(true, Math.min(fieldEvidence.confidence ?? 0, qualityConfidenceCap), imageUnusable, effectiveVerificationThreshold)
           : imageUnusable ? 'image-quality-insufficient' : candidate.isCompliant ? 'detected-low-confidence' : candidate.status ?? 'not-detected';
         const resolvedStatus = reExtractionVerified ? 'verified' as const : numericReExtraction?.resolution_method === 'auto_resolved' ? 'detected-low-confidence' as const : status;
         const explicitLabel = rule.fieldName === 'netQuantity' && /\b(?:NETT?|NET)\s*(?:WEIGHT|WT|QUANTITY|QTY|CONTENTS?)?\b/i.test(window.text);
