@@ -45,6 +45,7 @@ import FixedConnectedReport from "./FixedConnectedReport";
 import ProductAwareScan from "./ProductAwareScan";
 import MatchingProductCatalog from "./MatchingProductCatalog";
 import CompanyDashboard from "./CompanyDashboard";
+import ProfileDropdown from "./ProfileDropdown";
 import ThemeToggle from "./ThemeToggle";
 import { ThemeContext } from "./themeContext";
 
@@ -162,6 +163,9 @@ export default function App() {
     null,
   );
   const [loadError, setLoadError] = useState("");
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [notifError, setNotifError] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [theme, setTheme] = useState<"light" | "dark">(() =>
     localStorage.getItem("metro-check-theme") === "dark" ? "dark" : "light",
   );
@@ -175,7 +179,18 @@ export default function App() {
     apiRequest<Inspection[]>("/api/inspections")
       .then(setInspections)
       .catch((error: Error) => setLoadError(error.message));
+    apiRequest<any[]>("/api/notifications")
+      .then(setNotifications)
+      .catch((error: Error) => setNotifError(error.message));
   }, []);
+
+  const unreadCount = notifications.filter((n) => !n.read).length;
+  const filteredInspections = inspections.filter(
+    (i) =>
+      i.product.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      i.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (i.company && i.company.toLowerCase().includes(searchQuery.toLowerCase()))
+  );
   const openInspection = (inspection: Inspection) => {
     setSelected(inspection);
     setView("report");
@@ -267,7 +282,7 @@ export default function App() {
             >
               <Icon size={18} />
               <span>{label}</span>
-              {id === "notifications" && <em>3</em>}
+              {id === "notifications" && unreadCount > 0 && <em>{unreadCount}</em>}
             </button>
           ))}
         </nav>
@@ -310,20 +325,23 @@ export default function App() {
           </div>
           <div className="top-actions">
             <ThemeToggle />
-            <button className="icon-button" aria-label="Search">
+            <div className="search-field">
               <Search size={19} />
-            </button>
+              <input
+                type="text"
+                placeholder="Search..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
             <button
               className="icon-button notification"
               aria-label="Notifications"
             >
               <Bell size={19} />
-              <i />
+              {unreadCount > 0 && <i />}
             </button>
-            <div className="avatar">AS</div>
-            <button className="button ghost top-signout" onClick={logout}>
-              Sign out
-            </button>
+            <ProfileDropdown user={user} onLogout={logout} />
           </div>
         </header>
         <div className="page-wrap">
@@ -331,7 +349,7 @@ export default function App() {
             {view === "overview" && (
               <Overview
                 key="overview"
-                inspections={inspections}
+                inspections={filteredInspections}
                 onScan={startScan}
                 onOpen={openInspection}
                 onHistory={() => setView("history")}
@@ -563,7 +581,7 @@ function RoleShell({
           </div>
           <div className="top-actions">
             <ThemeToggle />
-            <div className="avatar">{user.name.slice(0, 2).toUpperCase()}</div>
+            <ProfileDropdown user={user} onLogout={onLogout} />
           </div>
         </header>
         <div className="page-wrap">
