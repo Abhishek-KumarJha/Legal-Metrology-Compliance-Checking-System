@@ -10,6 +10,7 @@ server/dist/
 
 # Runtime uploads and temporary files
 server/uploads/*
+server/reports/*
 server/data/*.tmp
 server/*.traineddata
 
@@ -18,6 +19,8 @@ server/data/inspections.json
 server/data/products.json
 server/data/notifications.json
 server/data/rule-settings.json
+server/data/users.json
+server/data/reports.json
 
 # Environment and editor files
 .env
