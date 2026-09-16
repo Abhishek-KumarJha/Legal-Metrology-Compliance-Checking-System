@@ -167,7 +167,6 @@ export default function App() {
   const [loadError, setLoadError] = useState("");
   const [notifications, setNotifications] = useState<any[]>([]);
   const [notifError, setNotifError] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
   const [theme, setTheme] = useState<"light" | "dark">(() =>
     localStorage.getItem("metro-check-theme") === "dark" ? "dark" : "light",
   );
@@ -189,12 +188,7 @@ export default function App() {
   }, []);
 
   const unreadCount = notifications.filter((n) => !n.read).length;
-  const filteredInspections = inspections.filter(
-    (i) =>
-      i.product.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      i.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (i.company && i.company.toLowerCase().includes(searchQuery.toLowerCase()))
-  );
+  const filteredInspections = inspections;
   const openInspection = (inspection: Inspection) => {
     setSelected(inspection);
     setView("report");
@@ -397,15 +391,6 @@ export default function App() {
           </div>
           <div className="top-actions">
             <ThemeToggle />
-            <div className="search-field">
-              <Search size={19} />
-              <input
-                type="text"
-                placeholder="Search..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-            </div>
             <button
               className="icon-button notification"
               aria-label="Notifications"
