@@ -156,6 +156,7 @@ export default function App() {
   });
   const authenticated = Boolean(user);
   const [view, setView] = useState<View>("overview");
+  const [previousView, setPreviousView] = useState<View>("overview");
   const [mobileNav, setMobileNav] = useState(false);
   const [inspections, setInspections] = useState<Inspection[]>([]);
   const [selected, setSelected] = useState<Inspection | null>(null);
@@ -205,6 +206,13 @@ export default function App() {
   const startScan = () => {
     setRescanInspection(null);
     setView("scan");
+  };
+  const toggleNotifications = () => {
+    setView((current) => {
+      if (current === "notifications") return previousView;
+      setPreviousView(current);
+      return "notifications";
+    });
   };
   const confirmLogout = () => {
     localStorage.removeItem("metro-check-user");
@@ -270,14 +278,19 @@ export default function App() {
 
   if (user.role === "admin")
     return themed(view === "people" ? (
-      <RoleShell user={user} onLogout={logout}>
+      <RoleShell user={user} onLogout={logout} onNotificationsToggle={toggleNotifications}>
         <ConnectedPeople user={user} onBack={() => setView("overview")} />
+      </RoleShell>
+    ) : view === "notifications" ? (
+      <RoleShell user={user} onLogout={logout} onNotificationsToggle={toggleNotifications} notificationsOpen>
+        <ConnectedNotifications />
       </RoleShell>
     ) : (
       <ConnectedAdminDashboard
         user={user}
         onLogout={logout}
         onManageOfficers={() => setView("people")}
+        onNotificationsToggle={toggleNotifications}
       />
     ));
   if (user.role === "company")
@@ -371,6 +384,8 @@ export default function App() {
             <button
               className="icon-button notification"
               aria-label="Notifications"
+              aria-pressed={view === "notifications"}
+              onClick={toggleNotifications}
             >
               <Bell size={19} />
               {unreadCount > 0 && <i />}
@@ -544,10 +559,14 @@ function Login({ onLogin, theme, onThemeToggle }: { onLogin: (user: AuthUser) =>
 function RoleShell({
   user,
   onLogout,
+  onNotificationsToggle,
+  notificationsOpen = false,
   children,
 }: {
   user: AuthUser;
   onLogout: () => void;
+  onNotificationsToggle?: () => void;
+  notificationsOpen?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -615,6 +634,16 @@ function RoleShell({
           </div>
           <div className="top-actions">
             <ThemeToggle />
+            {onNotificationsToggle && (
+              <button
+                className="icon-button notification"
+                aria-label="Notifications"
+                aria-pressed={notificationsOpen}
+                onClick={onNotificationsToggle}
+              >
+                <Bell size={19} />
+              </button>
+            )}
             <ProfileDropdown user={user} onLogout={onLogout} />
           </div>
         </header>
@@ -2580,10 +2609,12 @@ function ConnectedAdminDashboard({
   user,
   onLogout,
   onManageOfficers,
+  onNotificationsToggle,
 }: {
   user: AuthUser;
   onLogout: () => void;
   onManageOfficers: () => void;
+  onNotificationsToggle: () => void;
 }) {
   const [analytics, setAnalytics] = useState<{
     total: number;
@@ -2610,7 +2641,7 @@ function ConnectedAdminDashboard({
     activeRules: 0,
   };
   return (
-    <RoleShell user={user} onLogout={onLogout}>
+    <RoleShell user={user} onLogout={onLogout} onNotificationsToggle={onNotificationsToggle}>
       <Page
         kicker="ADMINISTRATION / STATE OFFICE"
         title="The state picture, clearly."
