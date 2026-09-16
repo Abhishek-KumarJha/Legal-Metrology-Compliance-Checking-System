@@ -11,6 +11,7 @@ The system is deliberately transparent: OCR extracts text, a configurable rule r
 - Role-based demo login for enforcement officers, administrators, and companies
 - Mobile-first label scan flow with multi-image upload
 - Tesseract.js OCR with an explicitly flagged, opt-in deterministic fallback for local demos
+- Optional PaddleOCR provider for higher-accuracy label text detection and bounding boxes
 - Regex-based checks for MRP, net quantity, date marking, manufacturer details, and consumer care
 - Persisted local development collections for inspections, products, notifications, and rule settings
 - Evidence image upload attached to inspections
@@ -31,7 +32,7 @@ The system is deliberately transparent: OCR extracts text, a configurable rule r
 | --- | --- |
 | Frontend | React, TypeScript, Vite, Framer Motion, Recharts, Lucide |
 | API | Node.js, Express, TypeScript, Multer |
-| OCR | Tesseract.js by default |
+| OCR | Tesseract.js by default; optional PaddleOCR 3.7 provider |
 | Development persistence | JSON collections in `server/data/` |
 | Production data model | PostgreSQL schema in `server/data/schema.prisma` |
 | File handling | Local disk in development; S3-compatible storage is the production target |
@@ -53,6 +54,16 @@ npm install --prefix client
 npm install --prefix server
 npm run dev
 ```
+
+To use PaddleOCR instead of Tesseract for label scans, install the optional Python provider with Python 3.11:
+
+```bash
+py -3.11 -m pip install -r server/requirements-paddle.txt
+set OCR_PROVIDER=paddle
+npm run dev --prefix server
+```
+
+PaddleOCR uses CPU mode on Windows (`enable_mkldnn=False`) and downloads its model files on first use. If it is unavailable or not enabled, scans continue using the default Tesseract provider.
 
 Open the frontend at [http://localhost:5173](http://localhost:5173). The API runs at [http://localhost:4000](http://localhost:4000).
 

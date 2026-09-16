@@ -15,6 +15,14 @@ assert.equal(runRuleEngine('100 g').find((check) => check.fieldName === 'netQuan
 assert.equal(runRuleEngine('Net Quantity: 40G').find((check) => check.fieldName === 'netQuantity')?.detectedValue, '40G');
 assert.equal(runRuleEngine('Net Quantity: 40 gm').find((check) => check.fieldName === 'netQuantity')?.detectedValue, '40 gm');
 assert.equal(runRuleEngine('Net Quantity: 40gm').find((check) => check.fieldName === 'netQuantity')?.detectedValue, '40gm');
+assert.equal(runRuleEngine('Net Quantity: 200 g il').find((check) => check.fieldName === 'netQuantity')?.detectedValue, '200 g');
+assert.equal(runRuleEngine('Contents: 2N').find((check) => check.fieldName === 'netQuantity')?.isCompliant, true);
+assert.equal(runRuleEngine('Net Quantity: 10 x 2N').find((check) => check.fieldName === 'netQuantity')?.isCompliant, true);
+assert.equal(runRuleEngine('Distributed by: Acme Retail Pvt Ltd').find((check) => check.fieldName === 'manufacturer')?.isCompliant, true);
+assert.equal(runRuleEngine('Manufactured & Packed by: HarvestGold Foods Pvt Ltd').find((check) => check.fieldName === 'manufacturer')?.isCompliant, true);
+assert.equal(runRuleEngine('Packed FEB 2027 by II\nBiscuits HarvestGold Foods Pvt. Ltd').find((check) => check.fieldName === 'manufacturer')?.isCompliant, true);
+assert.equal(runRuleEngine('MRP 180.00 Plot No. 12, Agro Park').find((check) => check.fieldName === 'manufacturer')?.isCompliant, false);
+assert.equal(runRuleEngine('Net Weight: 295 g\nProtein: 15.8 g').find((check) => check.fieldName === 'netQuantity')?.detectedValue, '295 g');
 const garbageQuantity = runRuleEngine('Net Quantity il');
 assert.equal(garbageQuantity.find((check) => check.fieldName === 'netQuantity')?.isCompliant, false);
 assert.equal(garbageQuantity.find((check) => check.fieldName === 'netQuantity')?.status, 'detected-low-confidence');
@@ -88,7 +96,7 @@ assert.equal(runRuleEngine('MFG FEB2014').find((check) => check.fieldName === 'd
 assert.equal(assessNumericEvidence('mrp', '29.00', 'MRP Rs 29-00', ['MRP', 'Rs', '29-00'])?.separatorUnambiguous, false);
 assert.equal(runRuleEngine('Best Before Three Months From Manufacturing').find((check) => check.fieldName === 'date')?.matchedVia, 'derived_from_duration');
 assert.match(runRuleEngine('Best Before Three Months From Manufacturing').find((check) => check.fieldName === 'date')?.detectedValue ?? '', /Manufacturing/i);
-assert.deepEqual(validationChecksForNumericEvidence(assessNumericEvidence('mrp', '29.00', 'MRP Rs 29.00', ['MRP', 'Rs', '29.00'])), { digit_count_ok: true, decimal_clear: false, proximity_ok: true });
+assert.deepEqual(validationChecksForNumericEvidence(assessNumericEvidence('mrp', '29.00', 'MRP Rs 29.00', ['MRP', 'Rs', '29.00'])), { digit_count_ok: true, decimal_clear: false, proximity_ok: true, width_plausible: true });
 assert.equal(reconstructOcrLines([
 	{ text: 'NET', confidence: 90, bbox: { x0: 10, y0: 10, x1: 45, y1: 30 }, symbols: [] },
 	{ text: '|', confidence: 99, bbox: { x0: 50, y0: 10, x1: 52, y1: 30 }, symbols: [] },

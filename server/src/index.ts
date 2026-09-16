@@ -4,7 +4,7 @@ import multer from 'multer';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analyzeImages, assessLegibility, assessReadability, boundingBoxForValue, fieldEvidenceForValue, validateScaleMmPerPixel, type ImageQuality } from './ocr.js';
+import { analyzeImages, assessLegibility, assessReadability, boundingBoxForValue, fieldEvidenceForValue, reextractNumericRegion, validateScaleMmPerPixel, type ImageQuality } from './ocr.js';
 import { minimumFontSizeForPack, rules } from './rules.js';
 import { assessNumericEvidence, classifyEvidenceStatus, runRuleEngine, sourceTextForField, summarizeChecks, validationChecksForNumericEvidence, type CheckResult } from './ruleEngine.js';
 import userSeed from '../data/users.seed.json' with { type: 'json' };
@@ -122,6 +122,21 @@ function productStatus(product: Product, companyChecks: Inspection[]) {
   return checks[0].status === 'Compliant' ? 'Compliant' : 'Non-compliant';
 }
 
+function hasManufacturerEvidence(text: string) {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized || /nutrition|thicken|sodium|sugar|serving|calorie|ingredient|wheat gluten/i.test(normalized)) return false;
+  const content = normalized.replace(/(?:MFD?\.?\s*BY|MFG\.?\s*BY|MANUFACTURED\s*(?:\/|OR)?\s*PACK(?:ED|ER)?\s*BY|PACK(?:ED|ER)\s*BY|MARKETED\s*BY|IMPORTED\s*BY|DISTRIBUTED\s*BY|MANUFACTURER)\b/gi, ' ').trim();
+  if (!content) return false;
+  if (/^(?:MRP|PRICE|RS\.?|INR|₹)\b|\b(?:MRP|MAXIMUM\s+RETAIL\s+PRICE)\s*[:.]?\s*\d/i.test(content)) return false;
+  const companyMarker = /\b(?:pvt\.?\s*ltd\.?|private|limited|inc\.?|corp\.?|corporation|foods?|home\s*care|industr(?:y|ies)|traders?|enterprises?|company|manufactur(?:er|ing))\b/i.test(content);
+  if (companyMarker && (content.match(/[A-Za-z]{3,}/g) ?? []).length >= 2) return true;
+  return false;
+}
+
+function hasConsumerCareEvidence(text: string) {
+  return /@|www\.|https?:\/\/|\b(?:consumer|customer)\s*care\b|\b(?:helpline|toll[- ]?free|contact|call)\b|\b1800[\s-]*\d{3}[\s-]*\d{3,4}\b|\b[6-9]\d{2}[\s-]?\d{3}[\s-]?\d{4}\b/i.test(text);
+}
+
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'metro-check-api' }));
 app.post('/api/auth/login', (req, res) => {
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
@@ -153,7 +168,9 @@ app.get('/api/analytics', (_req, res) => {
   const pendingReview = inspections.filter((inspection) => inspection.status === 'Review required' || inspection.status === 'Needs review').length;
   const nonCompliant = inspections.filter((inspection) => !['Compliant', 'Review required', 'Needs review'].includes(inspection.status)).length;
   const decided = compliant + nonCompliant;
-  return res.json({ total, compliant, pendingReview, nonCompliant, openCases: nonCompliant, complianceRate: decided ? Math.round((compliant / decided) * 1000) / 10 : 0, activeRules: ruleSettings.filter((rule) => rule.isActive).length });
+  const flagCounts = inspections.flatMap((inspection) => inspection.checks.filter((check) => !check.isCompliant).map((check) => check.label)).reduce<Record<string, number>>((counts, label) => ({ ...counts, [label]: (counts[label] ?? 0) + 1 }), {});
+  const flags = Object.entries(flagCounts).sort((left, right) => right[1] - left[1]).map(([label, count]) => ({ label, count, percent: total ? Math.round((count / Math.max(1, inspections.reduce((sum, inspection) => sum + inspection.checks.length, 0))) * 100) : 0 }));
+  return res.json({ total, compliant, pendingReview, nonCompliant, openCases: nonCompliant, complianceRate: decided ? Math.round((compliant / decided) * 1000) / 10 : 0, activeRules: ruleSettings.filter((rule) => rule.isActive).length, flags });
 });
 app.get('/api/users', (req, res) => { if (!requireAdmin(req, res)) return; return res.json(users.map(({ password: _password, ...user }) => user)); });
 app.post('/api/users', async (req, res) => {
@@ -334,9 +351,9 @@ app.post('/api/scan', upload.array('images', 4), async (req, res) => {
       ? 'unknown'
       : 'unknown');
   const panelClassificationIsExplicit = providedPanels.length > 0 && providedPanels.every((panel) => panel === 'principal' || panel === 'declarations');
-  const panelChecks = activeRules.map((rule) => {
+  const panelChecks = await Promise.all(activeRules.map(async (rule) => {
     const setting = ruleSettings.find((candidateSetting) => candidateSetting.fieldName === rule.fieldName) ?? defaultRuleSettings.find((candidateSetting) => candidateSetting.fieldName === rule.fieldName)!;
-    const pageCandidates = ocrAnalysis.pages.map((page, sourceImageIndex) => {
+    const pageCandidates = (await Promise.all(ocrAnalysis.pages.map(async (page, sourceImageIndex) => {
       // Panel labels are hints only. Every reconstructed OCR line is searched;
       // declaration filtering must never hide a valid field on another panel.
       const lines = page.lines;
@@ -347,28 +364,73 @@ app.post('/api/scan', upload.array('images', 4), async (req, res) => {
       }
       if (rule.fieldName === 'manufacturer') {
         windows.push(...lines.slice(0, -1).map((line, index) => ({ text: `${line.text}\n${lines[index + 1].text}`, words: [...line.words, ...lines[index + 1].words], lineIndex: index })));
+        windows.push(...lines.slice(0, -2).map((line, index) => ({ text: `${line.text}\n${lines[index + 1].text}\n${lines[index + 2].text}`, words: [...line.words, ...lines[index + 1].words, ...lines[index + 2].words], lineIndex: index })));
       }
-      return windows.map((window) => {
+      if (rule.fieldName === 'netQuantity') {
+        windows.push(...lines.slice(0, -1).filter((line) => !/\b(?:NETT?|NET)\s*(?:WEIGHT|WT|QUANTITY|QTY|CONTENTS?)?\b/i.test(line.text)).map((line, index) => ({ text: `${line.text}\n${lines[index + 1].text}`, words: [...line.words, ...lines[index + 1].words], lineIndex: index })));
+      }
+      return Promise.all(windows.map(async (window) => {
         const candidate = assessLegibility(runRuleEngine(window.text, [rule]), { ...pageAnalysis, words: window.words, scaleMmPerPixel })[0];
         const fieldEvidence = fieldEvidenceForValue(candidate.detectedValue, window.words);
-        const imageUnusable = page.imageQuality.overallQuality === 'UNUSABLE';
+        let labeledTokenQuantity: string | undefined;
+        if (rule.fieldName === 'netQuantity' && /\b(?:NETT?|NET)\s*(?:WEIGHT|WT|QUANTITY|QTY|CONTENTS?)?\b/i.test(window.text)) {
+          const labeledText = window.words.map((word) => word.text).join(' ');
+          labeledTokenQuantity = labeledText.match(/(?:^|[^A-Za-z])([0-9OIl]+(?:[.,-][0-9OIl]+)?)\s*(kg|litre|gm|mg|ml|g|l|n|nos|pieces?|tablets?)\b/i)?.[0];
+          if (labeledTokenQuantity) candidate.detectedValue = labeledTokenQuantity.replace(/^([^0-9OIl]*)/, '').replace(/[Oo]/g, '0').replace(/[Il]/g, '1');
+        }
+        const imageUnusable = page.imageQuality.overallQuality === 'UNUSABLE' && (!fieldEvidence.boundingBox || (fieldEvidence.boundingBox.height < 8));
         const sourceText = sourceTextForField(rule.fieldName, window.text, candidate.detectedValue);
         const numericEvidence = assessNumericEvidence(rule.fieldName, candidate.detectedValue, window.text, fieldEvidence.tokens);
         const numericReviewRequired = Boolean(numericEvidence?.reviewReason);
+        const numericCharacterCount = (candidate.detectedValue?.replace(/\s/g, '').length ?? 0);
+        const widthRatio = fieldEvidence.boundingBox && fieldEvidence.boundingBox.height > 0 ? fieldEvidence.boundingBox.width / fieldEvidence.boundingBox.height : 0;
+        const widthMismatch = ['mrp', 'netQuantity', 'date'].includes(rule.fieldName) && Boolean(candidate.detectedValue && fieldEvidence.boundingBox && widthRatio > numericCharacterCount * 0.55 + 0.5);
+        const numericAmbiguous = Boolean(candidate.detectedValue && ['mrp', 'netQuantity', 'date'].includes(rule.fieldName) && (numericReviewRequired || widthMismatch || (fieldEvidence.confidence ?? 100) < setting.verificationThreshold));
+        const numericReExtraction = (process.env.OCR_PROVIDER === 'paddle' || process.env.OCR_FAST === 'false') && numericAmbiguous && fieldEvidence.boundingBox && files[sourceImageIndex]
+          ? await reextractNumericRegion(files[sourceImageIndex].path, { ...fieldEvidence.boundingBox, coordinateWidth: page.width, coordinateHeight: page.height }, rule.fieldName, candidate.detectedValue!)
+          : undefined;
+        const resolvedNumeric = labeledTokenQuantity
+          ? candidate.detectedValue
+          : numericReExtraction?.resolution_method === 'auto_resolved' && numericReExtraction.final_value
+          ? numericReExtraction.final_value
+          : candidate.detectedValue;
+        const qualityConfidenceCap = fieldEvidence.boundingBox && fieldEvidence.boundingBox.height >= 8
+          ? page.imageQuality.overallQuality === 'UNUSABLE' ? 84 : page.imageQuality.overallQuality === 'POOR' ? 60 : page.imageQuality.overallQuality === 'FAIR' ? 79 : 100
+          : page.imageQuality.overallQuality === 'UNUSABLE' ? 40 : page.imageQuality.overallQuality === 'POOR' ? 60 : page.imageQuality.overallQuality === 'FAIR' ? 79 : 100;
+        const resolvedConfidence = Math.min(numericReExtraction?.confidence_per_pass.length ? Math.max(...numericReExtraction.confidence_per_pass) : fieldEvidence.confidence ?? 0, qualityConfidenceCap);
+        const reExtractionVerified = numericReExtraction?.resolution_method === 'auto_resolved'
+          && resolvedConfidence >= setting.verificationThreshold
+          && !imageUnusable;
+        const resolvedEvidence = numericReExtraction?.resolution_method === 'auto_resolved' && reExtractionVerified
+          ? { digitCountPlausible: true, separatorUnambiguous: true, structuralCheckPassed: true, widthPlausible: true }
+          : numericReExtraction ? { digitCountPlausible: numericEvidence?.digitCountPlausible ?? false, separatorUnambiguous: numericEvidence?.separatorUnambiguous ?? false, structuralCheckPassed: numericEvidence?.structuralCheckPassed ?? false, widthPlausible: false, reviewReason: `${numericEvidence?.reviewReason ?? 'Numeric re-extraction did not converge'} Candidate reads: ${numericReExtraction.candidate_reads.join(', ') || 'none'}.` } : numericEvidence;
         const status = candidate.isCompliant && !numericReviewRequired
-          ? classifyEvidenceStatus(true, fieldEvidence.confidence, imageUnusable, setting.verificationThreshold)
+          ? classifyEvidenceStatus(true, Math.min(fieldEvidence.confidence ?? 0, qualityConfidenceCap), imageUnusable, setting.verificationThreshold)
           : imageUnusable ? 'image-quality-insufficient' : candidate.isCompliant ? 'detected-low-confidence' : candidate.status ?? 'not-detected';
-        return { ...candidate, status, confidenceNote: numericReviewRequired ? numericEvidence?.reviewReason ?? 'Numeric evidence requires manual review.' : candidate.confidenceNote, confidence: fieldEvidence.confidence, ocrTokens: fieldEvidence.tokens, sourceText, numericEvidence, validationChecks: validationChecksForNumericEvidence(numericEvidence), sourceImageIndex, sourcePanel: providedPanels[sourceImageIndex] ?? 'unknown', boundingBox: fieldEvidence.boundingBox, sourceImageWidth: page.width, sourceImageHeight: page.height, imageQuality: page.imageQuality, lineIndex: window.lineIndex };
-      });
-    }).flat().filter((candidate) => candidate.detectedValue);
-    const bestCandidate = [...pageCandidates].sort((left, right) => (right.confidence ?? -1) - (left.confidence ?? -1))[0];
-    if (bestCandidate) return { ...bestCandidate, isCompliant: bestCandidate.status === 'verified', confidenceNote: bestCandidate.numericEvidence?.reviewReason ?? (bestCandidate.status === 'detected-low-confidence' ? 'Declaration detected, but matched OCR word confidence is below the configured verification threshold.' : bestCandidate.status === 'image-quality-insufficient' ? 'Image quality is too poor for reliable inspection.' : bestCandidate.confidenceNote) };
+        const resolvedStatus = reExtractionVerified ? 'verified' as const : numericReExtraction?.resolution_method === 'auto_resolved' ? 'detected-low-confidence' as const : status;
+        const explicitLabel = rule.fieldName === 'netQuantity' && /\b(?:NETT?|NET)\s*(?:WEIGHT|WT|QUANTITY|QTY|CONTENTS?)?\b/i.test(window.text);
+        const nutritionContext = rule.fieldName === 'netQuantity' && /nutrition|nutrient|calories?|protein|carbohydrate|fibre|fiber|sodium|sugars?|ingredients?|contains|serving|%/i.test(window.text);
+        const proximityScore = explicitLabel ? 100 : rule.fieldName === 'netQuantity' && /\b(?:g|kg|gm|mg|ml|l|n|nos|pieces?|tablets?|pairs?|sheets?)\b/i.test(window.text) ? 10 : 0;
+        const formatScore = rule.fieldName === 'netQuantity' && /\b(?:\d+\s*[xX]\s*)?\d+(?:[.,]\d+)?\s*(?:kg|litre|gm|mg|ml|g|l|n|nos|pieces?|tablets?|pairs?|sheets?)\b/i.test(resolvedNumeric ?? '') ? 20 : 0;
+        return { ...candidate, detectedValue: resolvedNumeric, isCompliant: reExtractionVerified || (!numericReExtraction && candidate.isCompliant), status: resolvedStatus, outputStatus: resolvedStatus === 'verified' ? 'passed' as const : 'needs_review' as const, confidenceNote: numericReExtraction?.resolution_method === 'manual_required' || (numericReExtraction?.resolution_method === 'auto_resolved' && !reExtractionVerified) ? `${numericEvidence?.reviewReason ?? 'Numeric evidence requires manual review.'} Candidate reads: ${numericReExtraction.candidate_reads.join(', ') || 'none'}.` : numericReExtraction?.resolution_method === 'auto_resolved' ? `Numeric value re-extracted consistently from the targeted image region: ${resolvedNumeric}.` : candidate.confidenceNote, confidence: resolvedConfidence, ocrTokens: fieldEvidence.tokens, sourceText: sourceTextForField(rule.fieldName, window.text, resolvedNumeric), numericEvidence: resolvedEvidence, numericReExtraction, validationChecks: validationChecksForNumericEvidence(resolvedEvidence), sourceImageIndex, sourcePanel: providedPanels[sourceImageIndex] ?? 'unknown', boundingBox: fieldEvidence.boundingBox, sourceImageWidth: page.width, sourceImageHeight: page.height, imageQuality: page.imageQuality, lineIndex: window.lineIndex, explicitLabel, nutritionContext, proximityScore, formatScore };
+      }));
+    }))).flat().filter((candidate) => candidate.detectedValue && (rule.fieldName !== 'manufacturer' || candidate.isCompliant && hasManufacturerEvidence(candidate.detectedValue)));
+    const labeledNetCandidates = rule.fieldName === 'netQuantity' ? pageCandidates.filter((candidate) => candidate.explicitLabel) : [];
+    const rankedCandidates = labeledNetCandidates.length ? labeledNetCandidates : pageCandidates.filter((candidate) => !candidate.nutritionContext);
+    const bestCandidate = [...rankedCandidates].sort((left, right) => ((right.proximityScore ?? 0) + (right.formatScore ?? 0) - (left.proximityScore ?? 0) - (left.formatScore ?? 0)) || ((right.confidence ?? -1) - (left.confidence ?? -1)))[0];
+    if (bestCandidate) return { ...bestCandidate, isCompliant: bestCandidate.status === 'verified', outputStatus: bestCandidate.status === 'verified' ? 'passed' as const : 'needs_review' as const, confidenceNote: bestCandidate.numericReExtraction?.resolution_method === 'manual_required' ? bestCandidate.confidenceNote : bestCandidate.numericEvidence?.reviewReason ?? (bestCandidate.status === 'detected-low-confidence' ? 'Declaration detected, but matched OCR word confidence is below the configured verification threshold.' : bestCandidate.status === 'image-quality-insufficient' ? 'Image quality is too poor for reliable inspection.' : bestCandidate.confidenceNote) };
     const requiredPanelMissing = ocrAnalysis.pages.length > 0 && panelClassificationIsExplicit && !providedPanels.includes(rule.expectedPanel);
-    const hasPartialEvidence = ocrAnalysis.pages.some((page) => page.lines.some((line) => rule.fieldName === 'consumerCare' ? /@|www\.|https?:\/\/|\b(?:1800|[6-9]\d{2})\b/i.test(line.text) : rule.fieldName === 'manufacturer' ? /(?:pvt|ltd|limited|inc\.?|corp\.?|street|road|[0-9]{5,6})/i.test(line.text) : false));
-    const notVisible = !requiredPanelMissing && !hasPartialEvidence && ['manufacturer', 'consumerCare'].includes(rule.fieldName);
-    return { fieldName: rule.fieldName, label: rule.label, detectedValue: null, isCompliant: false, ruleSection: rule.ruleSection, confidenceNote: requiredPanelMissing ? 'Expected panel was not provided after checking all uploaded images.' : notVisible ? `This declaration was not visible in the uploaded images. It is commonly found on the back/side panel; capture an additional panel photo.` : 'No declaration matched on any uploaded image.', minFontSizeMm: rule.minFontSizeMm, expectedPanel: rule.expectedPanel, status: requiredPanelMissing ? 'panel-not-provided' as const : notVisible ? 'not-visible-in-uploaded-images' as const : 'not-detected' as const };
-  });
-  const checks = compareChecks(panelChecks, product).map((check) => ({ ...check, needsReview: check.status !== 'verified' }));
+    const hasPartialEvidence = ocrAnalysis.pages.some((page) => page.lines.some((line) => rule.fieldName === 'consumerCare' ? hasConsumerCareEvidence(line.text) : rule.fieldName === 'manufacturer' ? hasManufacturerEvidence(line.text) : false));
+    const notVisible = !requiredPanelMissing && !hasPartialEvidence && ocrAnalysis.pages.length > 0;
+    const missingStatus = requiredPanelMissing ? 'panel-not-provided' as const : notVisible ? 'not-visible-in-uploaded-images' as const : 'not-detected' as const;
+    return { fieldName: rule.fieldName, label: rule.label, detectedValue: null, isCompliant: false, ruleSection: rule.ruleSection, confidenceNote: requiredPanelMissing ? 'Expected panel was not provided after checking all uploaded images.' : notVisible ? `This declaration was not visible in the uploaded images. It is commonly found on the back/side panel; capture an additional panel photo.` : 'No declaration matched on any uploaded image.', minFontSizeMm: rule.minFontSizeMm, expectedPanel: rule.expectedPanel, status: missingStatus, outputStatus: notVisible ? 'not_visible_in_images' as const : 'needs_review' as const };
+  }));
+  const checks = compareChecks(panelChecks, product).map((check) => ({
+    ...check,
+    needsReview: check.status !== 'verified',
+    outputStatus: check.status === 'verified' ? 'passed' as const : check.status === 'not-visible-in-uploaded-images' ? 'not_visible_in_images' as const : 'needs_review' as const,
+    sourceImage: typeof check.sourceImageIndex === 'number' ? path.basename(files[check.sourceImageIndex]?.originalname ?? `image-${check.sourceImageIndex + 1}`) : undefined
+  }));
   const passedChecks = checks.filter((check) => check.isCompliant && check.comparisonStatus !== 'mismatch').length;
   const summary = { passed: passedChecks, failed: checks.length - passedChecks, total: checks.length, isCompliant: passedChecks === checks.length };
   const createdAt = new Date().toISOString();

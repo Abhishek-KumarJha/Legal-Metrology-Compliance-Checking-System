@@ -33,14 +33,16 @@ type CheckResult = {
     | "panel-not-provided"
     | "image-quality-insufficient"
     | "manual-verified";
+  outputStatus?: "passed" | "needs_review" | "not_visible_in_images";
   ruleSection: string;
   confidenceNote: string;
   confidence?: number | null;
   ocrTokens?: string[];
   sourceText?: string;
   matchedVia?: "explicit_label" | "inferred" | "derived_from_duration";
-  numericEvidence?: { digitCountPlausible: boolean; separatorUnambiguous: boolean; structuralCheckPassed: boolean; reviewReason?: string };
-  validationChecks?: { digit_count_ok: boolean; decimal_clear: boolean; proximity_ok: boolean };
+  numericEvidence?: { digitCountPlausible: boolean; separatorUnambiguous: boolean; structuralCheckPassed: boolean; widthPlausible?: boolean; reviewReason?: string };
+  numericReExtraction?: { initial_read: string; candidate_reads: string[]; final_value: string | null; resolution_method: "auto_resolved" | "manual_required"; confidence_per_pass: number[]; crop_attempts?: Array<{ expansion_factor: number; x: number; y: number; width: number; height: number; candidate_reads: string[]; confidence_per_pass: number[]; preview_paths?: string[] }> };
+  validationChecks?: { digit_count_ok: boolean; decimal_clear: boolean; proximity_ok: boolean; width_plausible?: boolean };
   sourceImageIndex?: number;
   sourcePanel?: "principal" | "declarations" | "side" | "unknown";
   boundingBox?: { x: number; y: number; width: number; height: number };
@@ -66,7 +68,7 @@ type Inspection = {
   checks?: CheckResult[];
   labelImages?: string[];
   ocrConfidence?: number | null;
-  imageQuality?: { resolution: "GOOD" | "FAIR" | "POOR"; blur: "GOOD" | "FAIR" | "POOR"; brightness: "GOOD" | "FAIR" | "POOR"; contrast: "GOOD" | "FAIR" | "POOR"; overallQuality: "GOOD" | "FAIR" | "POOR" | "UNUSABLE"; note: string };
+  imageQuality?: { resolution: "GOOD" | "FAIR" | "POOR"; blur: "GOOD" | "FAIR" | "POOR"; brightness: "GOOD" | "FAIR" | "POOR"; contrast: "GOOD" | "FAIR" | "POOR"; glare?: "GOOD" | "FAIR" | "POOR"; tiltAngleDeg?: number | null; textHeightPx?: number | null; overallQuality: "GOOD" | "FAIR" | "POOR" | "UNUSABLE"; note: string };
   ocrFallbackUsed?: boolean;
   readability?: {
     readable: boolean;
@@ -348,7 +350,18 @@ export default function FixedConnectedReport({
                     <small>Reason: {check.confidenceNote}</small>
                     {check.sourceText && <small>Source text: "{check.sourceText}"</small>}
                     {check.matchedVia && <small>Matched via: {check.matchedVia === "explicit_label" ? "explicit label" : check.matchedVia === "derived_from_duration" ? "duration statement" : "inferred context"}</small>}
-                    {check.numericEvidence && <small>Numeric checks: {check.numericEvidence.digitCountPlausible && check.numericEvidence.separatorUnambiguous && check.numericEvidence.structuralCheckPassed ? "passed" : "manual review required"}</small>}
+                    {check.numericEvidence && <small>Numeric checks: {check.numericEvidence.digitCountPlausible && check.numericEvidence.separatorUnambiguous && check.numericEvidence.structuralCheckPassed && check.numericEvidence.widthPlausible !== false ? "passed" : "manual review required"}</small>}
+                    {check.numericReExtraction && <small>Targeted re-scan: {check.numericReExtraction.resolution_method === "auto_resolved" ? `resolved to ${check.numericReExtraction.final_value}` : `manual review required; candidates: ${check.numericReExtraction.candidate_reads.join(", ") || "none"}`}</small>}
+                    {check.numericReExtraction?.resolution_method === "manual_required" && check.numericReExtraction.candidate_reads.length > 0 && (
+                      <div className="manual-verify-options">
+                        <small>Choose a candidate reading:</small>
+                        {Array.from(new Set(check.numericReExtraction.candidate_reads)).map((candidate) => (
+                          <button className="button ghost" type="button" key={candidate} onClick={(event) => { event.stopPropagation(); setManualValues((current) => ({ ...current, [check.fieldName]: candidate })); }}>
+                            {candidate}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                     {check.comparisonStatus === "mismatch" && (
                       <small className="mismatch-values">
                         Registered: {check.registeredValue} · Detected:{" "}

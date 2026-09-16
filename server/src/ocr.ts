@@ -1,7 +1,11 @@
 import { createWorker, PSM } from 'tesseract.js';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createInterface } from 'node:readline';
 import sharp from 'sharp';
-import type { CheckResult } from './ruleEngine.js';
+import { fileURLToPath } from 'node:url';
+import type { CheckResult, NumericReExtraction } from './ruleEngine.js';
 
 const LEGIBILITY_THRESHOLDS = { sizeDifferenceRatio: 0.35, crampedGapRatio: -0.15, stretchedGapRatio: 2.5 };
 
@@ -26,8 +30,68 @@ export type OcrAnalysis = {
   words: OcrWord[];
   pages: OcrPage[];
 };
-export type ImageQuality = { resolution: 'GOOD' | 'FAIR' | 'POOR'; blur: 'GOOD' | 'FAIR' | 'POOR'; brightness: 'GOOD' | 'FAIR' | 'POOR'; contrast: 'GOOD' | 'FAIR' | 'POOR'; overallQuality: 'GOOD' | 'FAIR' | 'POOR' | 'UNUSABLE'; note: string };
+export type ImageQuality = { resolution: 'GOOD' | 'FAIR' | 'POOR'; blur: 'GOOD' | 'FAIR' | 'POOR'; brightness: 'GOOD' | 'FAIR' | 'POOR'; contrast: 'GOOD' | 'FAIR' | 'POOR'; glare: 'GOOD' | 'FAIR' | 'POOR'; tiltAngleDeg: number | null; textHeightPx: number | null; overallQuality: 'GOOD' | 'FAIR' | 'POOR' | 'UNUSABLE'; note: string };
 export type OcrPage = { text: string; lines: OcrLine[]; confidence: number | null; minimumWordHeightPx: number | null; typicalWordHeightPx: number | null; wordCount: number; words: OcrWord[]; width: number; height: number; imageQuality: ImageQuality };
+
+export type NumericRegion = { x: number; y: number; width: number; height: number; coordinateWidth?: number; coordinateHeight?: number };
+
+type PaddlePage = { path: string; texts: string[]; scores: number[]; boxes: number[][] };
+let paddleWorker: ReturnType<typeof spawn> | null = null;
+let paddleWorkerQueue = Promise.resolve();
+
+function requestPaddleWorker(paths: string[]) {
+  const request = paddleWorkerQueue.then(() => new Promise<PaddlePage[]>((resolve, reject) => {
+    const scriptPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'paddle_ocr.py');
+    const python = process.env.PADDLE_PYTHON ?? 'py';
+    if (!paddleWorker || paddleWorker.killed) {
+      const pythonArgs = process.platform === 'win32' ? ['-3.11', scriptPath, '--worker'] : [scriptPath, '--worker'];
+      paddleWorker = spawn(python, pythonArgs, { env: { ...process.env, PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: 'True' }, stdio: ['pipe', 'pipe', 'ignore'] });
+      paddleWorker.once('error', (error) => { paddleWorker = null; reject(error); });
+    }
+    const worker = paddleWorker;
+    const reader = createInterface({ input: worker.stdout! });
+    const cleanup = () => reader.close();
+    reader.once('line', (line) => { cleanup(); try { resolve(JSON.parse(line) as PaddlePage[]); } catch (error) { reject(error); } });
+    worker.once('exit', () => { paddleWorker = null; cleanup(); reject(new Error('PaddleOCR worker exited')); });
+    worker.stdin!.write(`${JSON.stringify(paths)}\n`);
+  }));
+  paddleWorkerQueue = request.then(() => undefined, () => undefined);
+  return request;
+}
+
+async function analyzeWithPaddle(filePaths: string[]): Promise<OcrAnalysis> {
+  const normalizedPaths = await Promise.all(filePaths.map(async (filePath) => {
+    const normalizedPath = `${filePath}.paddle.png`;
+    await fs.writeFile(normalizedPath, await sharp(filePath, { failOn: 'error' }).rotate().resize({ width: 1200, fit: 'inside', withoutEnlargement: true }).png().toBuffer());
+    return normalizedPath;
+  }));
+  try {
+    const paddlePages = await requestPaddleWorker(normalizedPaths);
+  const pages: OcrPage[] = [];
+  for (const paddlePage of paddlePages) {
+    const metadata = await sharp(paddlePage.path, { failOn: 'error' }).metadata();
+    const width = metadata.width ?? 0;
+    const height = metadata.height ?? 0;
+    const words = paddlePage.texts.map((text, index) => {
+      const box = paddlePage.boxes[index] ?? [0, 0, 0, 0];
+      return { text, confidence: Math.round((paddlePage.scores[index] ?? 0) * 100), bbox: { x0: box[0], y0: box[1], x1: box[2], y1: box[3] }, symbols: [] };
+    });
+    const lines = reconstructOcrLines(words);
+    const heights = words.map((word) => word.bbox.y1 - word.bbox.y0).filter((item) => item > 0).sort((left, right) => left - right);
+    const image = await sharp(paddlePage.path, { failOn: 'error' }).rotate();
+    const stats = await image.stats();
+    const grayscale = await image.grayscale().raw().toBuffer({ resolveWithObject: true });
+    const glareRatio = grayscale.data.reduce((count, value) => count + (value >= 245 ? 1 : 0), 0) / Math.max(1, grayscale.data.length);
+    const confidence = words.length ? words.reduce((sum, word) => sum + word.confidence, 0) / words.length : null;
+    pages.push({ text: lines.map((line) => line.text).join('\n'), lines, confidence, minimumWordHeightPx: heights[0] ?? null, typicalWordHeightPx: heights.length ? heights[Math.floor(heights.length * 0.5)] : null, wordCount: words.length, words, width, height, imageQuality: assessImageQuality(width, height, stats, laplacianVariance(grayscale.data, grayscale.info.width, grayscale.info.height), glareRatio, null, heights.length ? heights[Math.floor(heights.length * 0.5)] : null) });
+  }
+  const allWords = pages.flatMap((page) => page.words);
+  const heights = allWords.map((word) => word.bbox.y1 - word.bbox.y0).filter((item) => item > 0).sort((left, right) => left - right);
+    return { text: pages.map((page) => page.text).join('\n'), confidence: allWords.length ? allWords.reduce((sum, word) => sum + word.confidence, 0) / allWords.length : null, minimumWordHeightPx: heights[0] ?? null, typicalWordHeightPx: heights.length ? heights[Math.floor(heights.length * 0.5)] : null, wordCount: allWords.length, words: allWords, pages };
+  } finally {
+    await Promise.all(normalizedPaths.map((normalizedPath) => fs.rm(normalizedPath, { force: true })));
+  }
+}
 
 export function boundingBoxForValue(value: string | null, words: OcrWord[]) {
   if (!value) return undefined;
@@ -89,15 +153,28 @@ export function selectDeclarationLines(lines: OcrLine[]) {
   });
 }
 
-function assessImageQuality(width: number, height: number, stats: { channels: Array<{ mean: number; stdev: number }> }, blurVariance: number): ImageQuality {
+function assessImageQuality(width: number, height: number, stats: { channels: Array<{ mean: number; stdev: number }> }, blurVariance: number, glareRatio: number, tiltAngleDeg: number | null, textHeightPx: number | null): ImageQuality {
   const resolution = width >= 1000 && height >= 700 ? 'GOOD' : width >= 700 && height >= 450 ? 'FAIR' : 'POOR';
   const brightness = stats.channels.reduce((sum, channel) => sum + channel.mean, 0) / Math.max(1, stats.channels.length);
   const deviation = stats.channels.reduce((sum, channel) => sum + channel.stdev, 0) / Math.max(1, stats.channels.length);
   const brightnessGrade = brightness < 35 || brightness > 235 ? 'POOR' : brightness < 55 || brightness > 210 ? 'FAIR' : 'GOOD';
   const contrast = deviation < 18 ? 'POOR' : deviation < 30 ? 'FAIR' : 'GOOD';
   const blur = blurVariance < 20 ? 'POOR' : blurVariance < 80 ? 'FAIR' : 'GOOD';
-  const overallQuality = resolution === 'POOR' || blur === 'POOR' || brightnessGrade === 'POOR' && contrast === 'POOR' ? 'UNUSABLE' : resolution === 'GOOD' && blur === 'GOOD' && brightnessGrade === 'GOOD' && contrast === 'GOOD' ? 'GOOD' : 'FAIR';
-  return { resolution, blur, brightness: brightnessGrade, contrast, overallQuality, note: overallQuality === 'UNUSABLE' ? 'Resolution, blur, brightness, or contrast prevents reliable inspection.' : 'Image metrics are sufficient for field-level OCR review.' };
+  const glare = glareRatio > 0.12 ? 'POOR' : glareRatio > 0.04 ? 'FAIR' : 'GOOD';
+  const tiltPoor = tiltAngleDeg !== null && Math.abs(tiltAngleDeg) > 12;
+  const overallQuality = resolution === 'POOR' || blur === 'POOR' || brightnessGrade === 'POOR' && contrast === 'POOR' ? 'UNUSABLE' : resolution === 'GOOD' && blur === 'GOOD' && brightnessGrade === 'GOOD' && contrast === 'GOOD' && glare === 'GOOD' && !tiltPoor ? 'GOOD' : 'FAIR';
+  return { resolution, blur, brightness: brightnessGrade, contrast, glare, tiltAngleDeg, textHeightPx, overallQuality, note: overallQuality === 'UNUSABLE' ? 'Resolution, blur, brightness, glare, or blur prevents reliable inspection.' : 'Image metrics include blur, glare, tilt, contrast, and recognized text height.' };
+}
+
+function estimateTextTilt(words: OcrWord[]) {
+  const angles = words.flatMap((word) => {
+    const symbols = word.symbols.filter((symbol) => symbol.text.trim());
+    if (symbols.length < 2) return [];
+    const first = symbols[0].bbox;
+    const last = symbols[symbols.length - 1].bbox;
+    return [Math.atan2(((last.y0 + last.y1) - (first.y0 + first.y1)) / 2, ((last.x0 + last.x1) - (first.x0 + first.x1)) / 2) * 180 / Math.PI];
+  }).filter((angle) => Number.isFinite(angle));
+  return angles.length ? angles.sort((left, right) => left - right)[Math.floor(angles.length / 2)] : null;
 }
 
 function laplacianVariance(data: Buffer, width: number, height: number) {
@@ -134,8 +211,137 @@ export function validateScaleMmPerPixel(value: number | undefined) {
   return value >= 0.001 && value <= 0.5 ? { value, valid: true } : { value, valid: false };
 }
 
+function numericRead(fieldName: string, text: string, initialRead?: string) {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  const withinExpectedDigitGrowth = (value: string | null) => {
+    if (!value || !initialRead) return value;
+    const initialDigits = (initialRead.match(/\d/g) ?? []).length;
+    const candidateDigits = (value.match(/\d/g) ?? []).length;
+    return candidateDigits <= initialDigits + 1 ? value : null;
+  };
+  if (fieldName === 'mrp') {
+    const match = normalized.match(/\d+(?:[.,-]\s*\d{1,2})?/);
+    return withinExpectedDigitGrowth(match?.[0].replace(/\s+/g, '').replace(',', '.').replace(/(\d+)-(?=\d{1,2}$)/, '$1.') ?? null);
+  }
+  if (fieldName === 'netQuantity') {
+    const match = normalized.match(/(?:\d+\s*[xX]\s*)?\d+(?:[.,-]\s*\d+)?\s*(?:kg|litre|gm|mg|ml|g|l|n|nos|pieces?|tablets?|pairs?|sheets?)?\b/i);
+    if (!match) return null;
+    const value = match[0].replace(/\s+/g, ' ').replace(',', '.').replace(/(\d+)-(?=\d{1,2}\s)/, '$1.').trim();
+    const unit = value.match(/(?:kg|litre|gm|mg|ml|g|l|n|nos|pieces?|tablets?|pairs?|sheets?)$/i)?.[0] ?? initialRead?.match(/(?:kg|litre|gm|mg|ml|g|l|n|nos|pieces?|tablets?|pairs?|sheets?)\b/i)?.[0];
+    return withinExpectedDigitGrowth(unit && !new RegExp(`(?:kg|litre|gm|mg|ml|g|l|n|nos|pieces?|tablets?|pairs?|sheets?)$`, 'i').test(value) ? `${value} ${unit}` : value);
+  }
+  return withinExpectedDigitGrowth(normalized.match(/\d+(?:[./-]\d+)+/)?.[0] ?? null);
+}
+
+type NumericCropResult = { buffer: Buffer; x: number; y: number; width: number; height: number };
+
+function expandedNumericRegion(region: NumericRegion, factor: number): NumericRegion {
+  const coordinateWidth = region.coordinateWidth ?? region.x + region.width;
+  const coordinateHeight = region.coordinateHeight ?? region.y + region.height;
+  const width = Math.min(coordinateWidth, region.width * factor);
+  const height = Math.min(coordinateHeight, region.height * factor);
+  return {
+    x: Math.max(0, Math.min(coordinateWidth - width, region.x - (width - region.width) / 2)),
+    y: Math.max(0, Math.min(coordinateHeight - height, region.y - (height - region.height) / 2)),
+    width,
+    height,
+    coordinateWidth,
+    coordinateHeight
+  };
+}
+
+async function numericCrop(filePath: string, region: NumericRegion, mode: 'normalized' | 'threshold' | 'high-threshold'): Promise<NumericCropResult | null> {
+  const source = await fs.readFile(filePath);
+  const oriented = await sharp(source, { failOn: 'error' }).rotate().toBuffer();
+  const metadata = await sharp(oriented, { failOn: 'error' }).metadata();
+  const sourceWidth = metadata.width ?? 0;
+  const sourceHeight = metadata.height ?? 0;
+  if (!sourceWidth || !sourceHeight) return null;
+  const scaleX = sourceWidth / Math.max(1, region.coordinateWidth ?? sourceWidth);
+  const scaleY = sourceHeight / Math.max(1, region.coordinateHeight ?? sourceHeight);
+  const scale = Math.max(scaleX, scaleY);
+  const padding = Math.max(2, Math.ceil(2 * scale));
+  const left = Math.max(0, Math.floor(region.x * scale - padding));
+  const top = Math.max(0, Math.floor(region.y * scale - padding));
+  const width = Math.min(sourceWidth - left, Math.max(1, Math.ceil(region.width * scale + padding * 2)));
+  const height = Math.min(sourceHeight - top, Math.max(1, Math.ceil(region.height * scale + padding * 2)));
+  let pipeline = sharp(oriented, { failOn: 'error' }).extract({ left, top, width, height }).grayscale().resize({ width: Math.max(1, width * 4), height: Math.max(1, height * 4), fit: 'fill', kernel: sharp.kernel.lanczos3 });
+  pipeline = mode === 'normalized' ? pipeline.normalize().sharpen() : pipeline.normalize().threshold(mode === 'high-threshold' ? 200 : 160);
+  return { buffer: await pipeline.png().toBuffer(), x: left, y: top, width, height };
+}
+
+export async function reextractNumericRegion(filePath: string, region: NumericRegion, fieldName: string, initialRead: string): Promise<NumericReExtraction> {
+  const worker = await createWorker('eng');
+  const candidateReads: string[] = [];
+  const confidencePerPass: number[] = [];
+  const cropAttempts: NonNullable<NumericReExtraction['crop_attempts']> = [];
+  const passResults: Array<{ read: string; confidence: number; expansionFactor: number; textWidth: number | null; textHeight: number | null }> = [];
+  try {
+    await worker.setParameters({ tessedit_char_whitelist: '0123456789.,-', tessedit_pageseg_mode: PSM.SINGLE_LINE });
+    for (const expansionFactor of [1.5, 1.75, 2] as const) {
+      const expanded = expandedNumericRegion(region, expansionFactor);
+      const attemptReads: string[] = [];
+      const attemptConfidence: number[] = [];
+      const previewPaths: string[] = [];
+      for (const mode of ['normalized', 'threshold', 'high-threshold'] as const) {
+        const crop = await numericCrop(filePath, expanded, mode);
+        if (!crop) continue;
+        if (process.env.DEBUG_OCR_RESCAN === 'true') {
+          const previewDirectory = path.resolve(process.cwd(), 'uploads', 'ocr-rescans');
+          await fs.mkdir(previewDirectory, { recursive: true });
+          const previewPath = path.join(previewDirectory, `${Date.now()}-${expansionFactor}-${mode}.png`);
+          await fs.writeFile(previewPath, crop.buffer);
+          previewPaths.push(previewPath);
+        }
+        await worker.setParameters({ tessedit_char_whitelist: '0123456789.,-', tessedit_pageseg_mode: mode === 'threshold' ? PSM.SINGLE_WORD : PSM.SINGLE_LINE });
+        const result = await worker.recognize(crop.buffer, {}, { text: true, blocks: true });
+        const read = numericRead(fieldName, result.data.text, initialRead);
+        const confidence = typeof result.data.confidence === 'number' ? Math.round(result.data.confidence) : 0;
+        const recognizedWords = result.data.blocks?.flatMap((block) => block.paragraphs?.flatMap((paragraph) => paragraph.lines?.flatMap((line) => line.words ?? []) ?? []) ?? []) ?? [];
+        const numericWords = recognizedWords.filter((word) => /\d/.test(word.text));
+        const textWidth = numericWords.length ? Math.max(...numericWords.map((word) => word.bbox.x1)) - Math.min(...numericWords.map((word) => word.bbox.x0)) : null;
+        const textHeight = numericWords.length ? Math.max(...numericWords.map((word) => word.bbox.y1)) - Math.min(...numericWords.map((word) => word.bbox.y0)) : null;
+        if (read) {
+          candidateReads.push(read);
+          attemptReads.push(read);
+          passResults.push({ read, confidence, expansionFactor, textWidth, textHeight });
+        }
+        if (typeof result.data.confidence === 'number') {
+          confidencePerPass.push(confidence);
+          attemptConfidence.push(confidence);
+        }
+      }
+      const attempt = { expansion_factor: expansionFactor, x: expanded.x, y: expanded.y, width: expanded.width, height: expanded.height, candidate_reads: attemptReads, confidence_per_pass: attemptConfidence, ...(previewPaths.length ? { preview_paths: previewPaths } : {}) };
+      cropAttempts.push(attempt);
+      console.debug(`[OCR numeric re-scan] ${JSON.stringify(attempt)}`);
+    }
+  } finally {
+    await worker.terminate();
+  }
+  const counts = new Map<string, number>();
+  for (const read of candidateReads) counts.set(read, (counts.get(read) ?? 0) + 1);
+  const widthPlausible = (read: string, pass: { expansionFactor: number; textWidth: number | null; textHeight: number | null }) => {
+    const observedWidthRatio = pass.textWidth && pass.textHeight
+      ? pass.textWidth / pass.textHeight
+      : region.width / Math.max(1, region.height);
+    const expectedWidthRatio = read.replace(/\s/g, '').length * 0.6;
+    const expandedBoxRatio = (region.width * pass.expansionFactor) / Math.max(1, region.height * pass.expansionFactor);
+    return observedWidthRatio >= expectedWidthRatio * 0.25 && (observedWidthRatio <= expectedWidthRatio * 2.5 || expandedBoxRatio <= expectedWidthRatio * 2.5);
+  };
+  const repeated = [...counts.entries()]
+    .filter(([read, count]) => count >= 2 && passResults.some((pass) => pass.read === read && widthPlausible(read, pass)))
+    .sort((left, right) => {
+      const leftPasses = passResults.filter((pass) => pass.read === left[0]);
+      const rightPasses = passResults.filter((pass) => pass.read === right[0]);
+      return (right[1] - left[1]) || (Math.max(...rightPasses.map((pass) => pass.confidence), 0) - Math.max(...leftPasses.map((pass) => pass.confidence), 0)) || (right[0].replace(/\s/g, '').length - left[0].replace(/\s/g, '').length);
+    })[0]?.[0] ?? null;
+  return { initial_read: initialRead, candidate_reads: candidateReads, final_value: repeated, resolution_method: repeated ? 'auto_resolved' : 'manual_required', confidence_per_pass: confidencePerPass, crop_attempts: cropAttempts };
+}
+
 export async function analyzeImages(filePaths: string[]): Promise<OcrAnalysis> {
   if (!filePaths.length) return { text: '', confidence: null, minimumWordHeightPx: null, typicalWordHeightPx: null, wordCount: 0, words: [], pages: [] };
+  if (process.env.OCR_PROVIDER === 'paddle') return analyzeWithPaddle(filePaths);
+  const fastTesseract = process.env.OCR_FAST !== 'false';
   const worker = await createWorker('eng');
   try {
     await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
@@ -156,7 +362,7 @@ export async function analyzeImages(filePaths: string[]): Promise<OcrAnalysis> {
         .grayscale()
         .normalize()
         .sharpen()
-        .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: false })
+        .resize({ width: 2400, height: 2400, fit: 'inside', withoutEnlargement: false })
         .png()
         .toBuffer();
       const inputMetadata = await sharp(input, { failOn: 'error' }).metadata();
@@ -167,14 +373,14 @@ export async function analyzeImages(filePaths: string[]): Promise<OcrAnalysis> {
           { left: 0.4, top: 0, width: 0.6, height: 0.5 },
           { left: 0, top: 0.15, width: 0.55, height: 0.55 },
           { left: 0, top: 0.45, width: 0.6, height: 0.55 }
-        ].map((region) => sharp(oriented, { failOn: 'error' }).extract({ left: Math.floor(orientedWidth * region.left), top: Math.floor(orientedHeight * region.top), width: Math.max(1, Math.floor(orientedWidth * region.width)), height: Math.max(1, Math.floor(orientedHeight * region.height)) }).grayscale().normalize().sharpen().resize({ width: 1800, height: 1200, fit: 'inside', withoutEnlargement: false }).png().toBuffer()))
+        ].map((region) => sharp(oriented, { failOn: 'error' }).extract({ left: Math.floor(orientedWidth * region.left), top: Math.floor(orientedHeight * region.top), width: Math.max(1, Math.floor(orientedWidth * region.width)), height: Math.max(1, Math.floor(orientedHeight * region.height)) }).grayscale().normalize().sharpen().resize({ width: 2400, height: 1600, fit: 'inside', withoutEnlargement: false }).png().toBuffer()))
         : [input];
       const passResults = [];
       const pageWords = new Map<string, OcrWord>();
       const pageTexts: string[] = [];
       const pageConfidences: number[] = [];
-      for (const candidate of [input, ...focusedInputs]) {
-        for (const mode of [PSM.SPARSE_TEXT, PSM.SINGLE_BLOCK]) {
+      for (const candidate of (fastTesseract ? [input] : [input, ...focusedInputs])) {
+        for (const mode of (fastTesseract ? [PSM.SPARSE_TEXT] : [PSM.SPARSE_TEXT, PSM.SINGLE_BLOCK])) {
           await worker.setParameters({ tessedit_pageseg_mode: mode });
           passResults.push(await worker.recognize(candidate, {}, { text: true, blocks: true, hocr: true }));
         }
@@ -208,7 +414,10 @@ export async function analyzeImages(filePaths: string[]): Promise<OcrAnalysis> {
       }
       const pageLineData = reconstructOcrLines([...pageWords.values()]);
       const pageHeights = [...pageWords.values()].filter(isMeaningfulOcrWord).map((word) => word.bbox.y1 - word.bbox.y0).filter((height) => height > 0).sort((left, right) => left - right);
-      pages.push({ text: pageLineData.map((line) => line.text).join('\n'), lines: pageLineData, confidence: pageConfidences.length ? Math.max(...pageConfidences) : null, minimumWordHeightPx: pageHeights.length ? pageHeights[0] : null, typicalWordHeightPx: pageHeights.length ? pageHeights[Math.floor(pageHeights.length * 0.5)] : null, wordCount: pageWords.size, words: [...pageWords.values()], width: inputMetadata.width ?? 0, height: inputMetadata.height ?? 0, imageQuality: assessImageQuality(orientedWidth, orientedHeight, imageStats, laplacianVariance(grayscale.data, grayscale.info.width, grayscale.info.height)) });
+      const glarePixels = grayscale.data.reduce((count, value) => count + (value >= 245 ? 1 : 0), 0);
+      const glareRatio = glarePixels / Math.max(1, grayscale.data.length);
+      const typicalPageHeight = pageHeights.length ? pageHeights[Math.floor(pageHeights.length * 0.5)] : null;
+      pages.push({ text: pageLineData.map((line) => line.text).join('\n'), lines: pageLineData, confidence: pageConfidences.length ? Math.max(...pageConfidences) : null, minimumWordHeightPx: pageHeights.length ? pageHeights[0] : null, typicalWordHeightPx: typicalPageHeight, wordCount: pageWords.size, words: [...pageWords.values()], width: inputMetadata.width ?? 0, height: inputMetadata.height ?? 0, imageQuality: assessImageQuality(orientedWidth, orientedHeight, imageStats, laplacianVariance(grayscale.data, grayscale.info.width, grayscale.info.height), glareRatio, estimateTextTilt([...pageWords.values()]), typicalPageHeight) });
       wordHeights.push(...[...words.values()].map((word) => word.bbox.y1 - word.bbox.y0).filter((height) => height > 0));
     }
     const sortedHeights = [...wordHeights].sort((left, right) => left - right);

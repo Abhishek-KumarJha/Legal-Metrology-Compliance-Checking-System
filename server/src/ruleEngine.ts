@@ -12,6 +12,7 @@ export type CheckResult = {
   sourceText?: string;
   matchedVia?: 'explicit_label' | 'inferred' | 'derived_from_duration';
   numericEvidence?: NumericEvidence;
+  numericReExtraction?: NumericReExtraction;
   validationChecks?: { digit_count_ok: boolean; decimal_clear: boolean; proximity_ok: boolean };
   sourceImageIndex?: number;
   sourcePanel?: 'principal' | 'declarations' | 'side' | 'unknown';
@@ -21,6 +22,8 @@ export type CheckResult = {
   minFontSizeMm: number;
   expectedPanel?: 'principal' | 'declarations';
   status?: EvidenceStatus;
+  outputStatus?: 'passed' | 'needs_review' | 'not_visible_in_images';
+  sourceImage?: string;
   manualValue?: string;
   originalOcrValue?: string | null;
   originalOcrConfidence?: number | null;
@@ -37,7 +40,15 @@ export type CheckResult = {
 };
 
 export type EvidenceStatus = 'verified' | 'detected-low-confidence' | 'not-detected' | 'not-visible-in-uploaded-images' | 'panel-not-provided' | 'image-quality-insufficient' | 'manual-verified';
-export type NumericEvidence = { digitCountPlausible: boolean; separatorUnambiguous: boolean; structuralCheckPassed: boolean; reviewReason?: string };
+export type NumericEvidence = { digitCountPlausible: boolean; separatorUnambiguous: boolean; structuralCheckPassed: boolean; widthPlausible?: boolean; reviewReason?: string };
+export type NumericReExtraction = {
+  initial_read: string;
+  candidate_reads: string[];
+  final_value: string | null;
+  resolution_method: 'auto_resolved' | 'manual_required';
+  confidence_per_pass: number[];
+  crop_attempts?: Array<{ expansion_factor: number; x: number; y: number; width: number; height: number; candidate_reads: string[]; confidence_per_pass: number[]; preview_paths?: string[] }>;
+};
 
 export function classifyEvidenceStatus(detected: boolean, fieldConfidence: number | null, imageUnusable: boolean, verificationThreshold: number) : EvidenceStatus {
   if (imageUnusable) return 'image-quality-insufficient';
@@ -53,7 +64,7 @@ export function sourceTextForField(fieldName: string, sourceText: string, detect
     mrp: /(?:(?:M\s*\.?\s*R\s*\.?\s*P|MAXIMUM\s+RETAIL\s+PRICE)\s*[:.-]?\s*)?(?:₹|Rs\.?|INR)\s*[0-9OIl]+(?:[.,\-/\s][0-9OIl]{1,2})?/i,
     netQuantity: new RegExp(`(?:NETT?|NET)\\s*(?:WEIGHT|WT|QUANTITY|QTY|CONTENTS)?\\s*[:.-]?\\s*${escapedValue}`, 'i'),
     date: new RegExp(`(?:(?:MFG|MFD|MANUF|PKD|PACKED|MANUFACTURED|BEST\\s+BEFORE|USE\\s+BY|EXP(?:IRY)?)\\s*[:.-]?\\s*)?${escapedValue}`, 'i'),
-    manufacturer: /(?:MFD?\.?\s*BY|MFG\.?\s*BY|MANUFACTURED\s*BY|PACK(?:ED|ER)\s*BY|MARKETED\s*BY|IMPORTED\s*BY|MANUFACTURER)\s*[:.-]?\s*[^\n]+/i,
+    manufacturer: /(?:MFD?\.?\s*BY|MFG\.?\s*BY|MANUFACTURED\s*BY|PACK(?:ED|ER)\s*BY|MARKETED\s*BY|IMPORTED\s*BY|DISTRIBUTED\s*BY|MANUFACTURER)\s*[:.-]?\s*[^\n]+/i,
     consumerCare: /(?:CONSUMER|CUSTOMER)\s*CARE[^\n]*|(?:1800[\s-]*\d{3}[\s-]*\d{3,4}|[6-9]\d{2}[\s-]?\d{3}[\s-]?\d{4})|[\w.+-]+@[\w.-]+\.[A-Z]{2,}/i
   };
   const match = patterns[fieldName]?.exec(sourceText);
@@ -75,7 +86,7 @@ export function assessNumericEvidence(fieldName: string, value: string | null, s
 }
 
 export function validationChecksForNumericEvidence(evidence?: NumericEvidence) {
-  return evidence ? { digit_count_ok: evidence.digitCountPlausible, decimal_clear: evidence.separatorUnambiguous, proximity_ok: evidence.structuralCheckPassed } : undefined;
+  return evidence ? { digit_count_ok: evidence.digitCountPlausible, decimal_clear: evidence.separatorUnambiguous, proximity_ok: evidence.structuralCheckPassed, width_plausible: evidence.widthPlausible ?? evidence.digitCountPlausible } : undefined;
 }
 
 export function runRuleEngine(ocrText: string, activeRules: Rule[] = rules): CheckResult[] {
@@ -107,7 +118,7 @@ export function runRuleEngine(ocrText: string, activeRules: Rule[] = rules): Che
 }
 
 function isSaneValue(fieldName: string, value: string) {
-  if (fieldName === 'netQuantity') return /\b\d+(?:[.,]\d+)?\s*(?:kg|litre|gm|mg|ml|g|l|n|nos|pieces?|tablets?)\b/i.test(value) && !/^[il]{1,3}\b/i.test(value.trim());
+  if (fieldName === 'netQuantity') return /\b(?:\d+\s*[xX]\s*)?\d+(?:[.,]\d+)?\s*(?:kg|litre|gm|mg|ml|g|l|n|nos|pieces?|tablets?|pairs?|sheets?)\b/i.test(value) && !/^[il]{1,3}\b/i.test(value.trim());
   if (fieldName === 'mrp') return /\d/.test(value) && Number(value.replace(',', '.')) >= 0;
   if (fieldName === 'date') return /\d/.test(value) || /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/i.test(value) || /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|twelve|\d+)\s+(?:days?|months?|years?)\s+(?:from|after|of)\b/i.test(value);
   if (fieldName === 'manufacturer') return value.replace(/[^a-z]/gi, '').length >= 3 && !/(nutrition|thicken|sodium|sugar|serving|calorie|ingredient|wheat gluten)/i.test(value);

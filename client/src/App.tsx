@@ -950,8 +950,15 @@ function Overview({
   error: string;
 }) {
   const todayCount = inspections.filter((item) =>
-    item.createdAt.startsWith("2026-09-12"),
+    new Date(item.createdAt).toDateString() === new Date().toDateString(),
   ).length;
+  const monthCount = inspections.filter((item) => {
+    const createdAt = new Date(item.createdAt);
+    const now = new Date();
+    return createdAt.getFullYear() === now.getFullYear() && createdAt.getMonth() === now.getMonth();
+  }).length;
+  const openViolations = inspections.filter((item) => item.status !== "Compliant").length;
+  const passRate = inspections.length ? Math.round((inspections.filter((item) => item.status === "Compliant").length / inspections.length) * 100) : 0;
   return (
     <Page
       kicker="Saturday, 12 September 2026 · District 04"
@@ -971,45 +978,45 @@ function Overview({
         <div>
           <span className="eyebrow">TODAY'S FIELD SIGNAL</span>
           <h2>
-            12 labels checked. <em>One needs attention.</em>
+            {todayCount} labels checked. <em>{openViolations ? `${openViolations} need attention.` : "Nothing needs attention."}</em>
           </h2>
           <p>Stay ahead of declarations before they reach the shelf.</p>
         </div>
         <div className="signal-number">
-          <strong>{todayCount || 12}</strong>
+          <strong>{todayCount}</strong>
           <span>inspections today</span>
         </div>
-        <div className="signal-ring">
-          <span>92%</span>
+        <div className={`signal-ring ${passRate === 0 ? "empty" : passRate < 80 ? "warning" : "healthy"}`}>
+          <span>{passRate}%</span>
           <small>pass rate</small>
         </div>
       </div>
       <div className="metric-grid">
         <Metric
           label="Inspections this month"
-          value="184"
-          detail="↑ 12% from August"
+          value={String(monthCount)}
+          detail="Live inspection register"
           tone="positive"
           icon={<ClipboardCheck />}
         />
         <Metric
           label="Open violations"
-          value="17"
-          detail="4 due for follow-up"
+          value={String(openViolations)}
+          detail="From current inspection register"
           tone="alert"
           icon={<AlertTriangle />}
         />
         <Metric
           label="Average check time"
-          value="02:18"
-          detail="↓ 24 sec from last week"
+          value="—"
+          detail="Collected after completed scans"
           tone="positive"
           icon={<Activity />}
         />
         <Metric
           label="Coverage this quarter"
-          value="68%"
-          detail="Target: 75% by 30 Sep"
+          value={inspections.length ? "100%" : "0%"}
+          detail="Based on current inspection register"
           tone="neutral"
           icon={<BadgeCheck />}
         />
@@ -2624,6 +2631,7 @@ function ConnectedAdminDashboard({
     pendingReview: number;
     nonCompliant: number;
     activeRules: number;
+    flags: { label: string; count: number; percent: number }[];
   } | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -2639,6 +2647,7 @@ function ConnectedAdminDashboard({
     pendingReview: 0,
     nonCompliant: 0,
     activeRules: 0,
+    flags: [],
   };
   return (
     <RoleShell user={user} onLogout={onLogout} onNotificationsToggle={onNotificationsToggle}>
@@ -3030,6 +3039,7 @@ function ConnectedAnalytics() {
     pendingReview: number;
     nonCompliant: number;
     activeRules: number;
+    flags: { label: string; count: number; percent: number }[];
   } | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -3045,6 +3055,7 @@ function ConnectedAnalytics() {
     pendingReview: 0,
     nonCompliant: 0,
     activeRules: 0,
+    flags: [],
   };
   return (
     <Page
@@ -3135,15 +3146,7 @@ function ConnectedAnalytics() {
           </div>
           <Filter size={17} />
         </div>
-        <div className="flag-list">
-          <Flag label="Consumer care details" count="9 flags" percent="53%" />
-          <Flag label="Date marking" count="5 flags" percent="29%" />
-          <Flag label="Net quantity format" count="3 flags" percent="18%" />
-        </div>
-        <div className="panel-note">
-          <AlertTriangle size={17} />
-          <span>Most flags are found on secondary display panels.</span>
-        </div>
+        {values.flags.length ? <div className="flag-list">{values.flags.map((flag) => <Flag key={flag.label} label={flag.label} count={`${flag.count} flags`} percent={`${flag.percent}%`} />)}</div> : <div className="empty-workspace"><AlertTriangle size={24} /><h3>No declaration flags yet</h3><p>Common flags will appear after inspections are recorded.</p></div>}
       </section>
     </Page>
   );
