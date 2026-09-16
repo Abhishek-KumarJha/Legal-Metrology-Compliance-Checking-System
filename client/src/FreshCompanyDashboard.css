@@ -1,0 +1,14 @@
+.profile-area { position: relative; margin-bottom: 28px; }
+.profile-area .workspace-switcher { width: calc(100% - 8px); margin: 0 4px; text-align: left; }
+.profile-trigger { color: inherit; cursor: pointer; }
+.profile-trigger:hover { background: #20423e; }
+.profile-chevron { margin-left: auto; transition: transform .18s ease; }
+.profile-chevron.open { transform: rotate(90deg); }
+.user-details { position: absolute; top: calc(100% + 8px); left: 4px; right: 4px; z-index: 5; padding: 14px; background: #f7f4ea; border: 1px solid #d7cfae; border-radius: 7px; box-shadow: 0 10px 24px rgba(0, 0, 0, .25); color: var(--ink); }
+.user-details > b, .user-details > small { display: block; }
+.user-details > b { margin-top: 7px; font-size: 14px; }
+.user-details > small { color: #68746d; font-size: 11px; margin-top: 3px; }
+.user-details > div { display: grid; gap: 3px; border-top: 1px solid #ddd6bd; margin-top: 12px; padding-top: 10px; }
+.user-details > div span { color: #767a70; font-size: 10px; }
+.user-details > div strong { font-size: 11px; overflow-wrap: anywhere; }
+.profile-close { position: absolute; top: 8px; right: 8px; padding: 3px; background: transparent; color: #68746d; }

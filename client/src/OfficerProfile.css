@@ -1,0 +1,14 @@
+.officer-profile-area { position: relative; margin-bottom: 28px; }
+.officer-profile-area .workspace-switcher { width: calc(100% - 8px); margin: 0 4px; }
+.officer-profile-trigger { color: inherit; cursor: pointer; text-align: left; }
+.officer-profile-trigger:hover { background: #20423e; }
+.officer-profile-chevron { margin-left: auto; transition: transform .18s ease; }
+.officer-profile-chevron.open { transform: rotate(90deg); }
+.officer-details { position: absolute; z-index: 10; top: calc(100% + 8px); right: 4px; left: 4px; padding: 14px; color: var(--ink); background: var(--paper); border: 1px solid #d7cfae; border-radius: 7px; box-shadow: 0 10px 24px rgba(0, 0, 0, .25); }
+.officer-details > b, .officer-details > small { display: block; }
+.officer-details > b { margin-top: 7px; font-size: 14px; }
+.officer-details > small { margin-top: 3px; color: #68746d; font-size: 11px; }
+.officer-details > div { display: grid; gap: 3px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.officer-details > div span { color: #767a70; font-size: 10px; }
+.officer-details > div strong { font-size: 11px; overflow-wrap: anywhere; }
+.officer-profile-close { position: absolute; top: 8px; right: 8px; padding: 3px; color: #68746d; background: transparent; }

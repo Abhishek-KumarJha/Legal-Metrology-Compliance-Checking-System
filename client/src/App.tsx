@@ -48,6 +48,7 @@ import CompanyDashboard from "./CompanyDashboard";
 import ProfileDropdown from "./ProfileDropdown";
 import ThemeToggle from "./ThemeToggle";
 import { ThemeContext } from "./themeContext";
+import "./OfficerProfile.css";
 
 type CheckResult = {
   fieldName: string;
@@ -171,6 +172,7 @@ export default function App() {
     localStorage.getItem("metro-check-theme") === "dark" ? "dark" : "light",
   );
   const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
+  const [officerProfileOpen, setOfficerProfileOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -308,13 +310,36 @@ export default function App() {
             <span>LEGAL METROLOGY / INDIA</span>
           </div>
         </div>
-        <div className="workspace-switcher">
-          <span className="avatar small">AS</span>
-          <div>
-            <b>Arun Sharma</b>
-            <small>Enforcement officer</small>
-          </div>
-          <ChevronRight size={16} />
+        <div className="officer-profile-area">
+          <button
+            className="workspace-switcher officer-profile-trigger"
+            onClick={() => setOfficerProfileOpen((open) => !open)}
+            aria-expanded={officerProfileOpen}
+            aria-controls="officer-details"
+          >
+            <span className="avatar small">{user.name.slice(0, 2).toUpperCase()}</span>
+            <div>
+              <b>{user.name}</b>
+              <small>Enforcement officer</small>
+            </div>
+            <ChevronRight size={16} className={officerProfileOpen ? "officer-profile-chevron open" : "officer-profile-chevron"} />
+          </button>
+          {officerProfileOpen && (
+            <section className="officer-details" id="officer-details" aria-label="User details">
+              <button className="officer-profile-close" onClick={() => setOfficerProfileOpen(false)} aria-label="Close user details"><X size={14} /></button>
+              <span className="eyebrow">SIGNED-IN USER</span>
+              <b>{user.name}</b>
+              <small>Enforcement officer</small>
+              <div>
+                <span>Email</span>
+                <strong>{user.email}</strong>
+              </div>
+              <div>
+                <span>Organisation</span>
+                <strong>{user.orgId}</strong>
+              </div>
+            </section>
+          )}
         </div>
         <nav>
           {nav.map(({ id, label, icon: Icon }) => (
